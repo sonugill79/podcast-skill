@@ -8,9 +8,16 @@ interpreter, and run standalone as a CLI before anything else is installed.
 
 Resolution order for every setting, lowest to highest precedence:
   1. DEFAULTS (below)
-  2. the config file: ${XDG_CONFIG_HOME:-~/.config}/topic-podcast/config.json
-  3. an environment variable (PODCAST_EPISODES_DIR, PODCAST_VOICE_ENGINE, PODCAST_QA_LEVEL,
+  2. plugin install-time options -- the answers a user gave Claude Code's install
+     prompts for plugin.json's userConfig, which Claude Code stores in ITS OWN
+     settings files, not ours, and does NOT expose as environment variables in a
+     normal session (only inside a hook's env) -- see _plugin_options().
+  3. the config file: ${XDG_CONFIG_HOME:-~/.config}/topic-podcast/config.json
+  4. an environment variable (PODCAST_EPISODES_DIR, PODCAST_VOICE_ENGINE, PODCAST_QA_LEVEL,
      PODCAST_TELEGRAM_BOT, PODCAST_LISTENER_PROFILE) -- set and non-empty wins outright.
+Rationale for (2) sitting under our own config file and env: the install-time answer
+must beat a built-in default, but an explicit local file or env override -- something
+the user did on purpose, after the fact, on this machine -- should still win.
 PODCAST_CONFIG overrides the config file's own path (used heavily by --selftest so it
 never touches a real user config). PODCAST_STATE_DIR overrides the state directory
 (venv/, models/, installed.json) the same way.
@@ -169,22 +176,104 @@ def _atomic_write_json(path, data):
 # Config: load / save
 # ---------------------------------------------------------------------------
 
-def _read_config_file():
+def _read_json_file(path):
+    """A dict if `path` exists and holds a JSON object, else None. Every failure
+    mode (missing, unreadable, not valid JSON, valid JSON but not an object) is a
+    silent None -- never a traceback. Shared by _read_config_file() and
+    _plugin_options() so both settings sources fail the same, safe way."""
     try:
-        with open(config_path(), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        # A malformed config file falls back to defaults rather than crashing every
-        # script that imports this module -- the user can fix it with `set` or by hand.
-        return {}
+        return data if isinstance(data, dict) else None
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_config_file():
+    return _read_json_file(config_path()) or {}
+
+
+# Plugin.json's own name; matched as a PREFIX (see _plugin_options()) rather than
+# an exact "podcast@<marketplace>" string, so a fork installed under a different
+# marketplace name is still picked up.
+PLUGIN_NAME_PREFIX = "podcast@"
+
+
+def _claude_settings_paths():
+    """Claude Code settings files that may hold this plugin's install-time
+    userConfig answers (pluginConfigs[...].options), most-specific first --
+    mirrors Claude Code's own settings precedence (local project > shared project
+    > user), so if the same key somehow appears in more than one, the more
+    specific file wins. Project files are resolved relative to the CURRENT
+    directory, so this only finds them when config.py happens to run from inside
+    (or under) the project the user is working in -- a reasonable "easy to
+    locate" reading of the request, not an exhaustive upward search."""
+    paths = [
+        os.path.join(os.getcwd(), ".claude", "settings.local.json"),
+        os.path.join(os.getcwd(), ".claude", "settings.json"),
+    ]
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        paths.append(os.path.join(os.path.expanduser(config_dir), "settings.json"))
+    else:
+        paths.append(os.path.expanduser("~/.claude/settings.json"))
+    return paths
+
+
+def _plugin_options():
+    """This plugin's install-time userConfig answers (episodes_dir, voice_engine,
+    ...), as Claude Code recorded them under pluginConfigs in one of its own
+    settings files -- NOT ours, and NOT exposed as environment variables outside a
+    hook, so this is the only way config.py can see them at all. Checked in
+    _claude_settings_paths() order; the first file with a matching, well-formed
+    entry wins (no merging across files). Every file is read via _read_json_file()
+    (defensive: missing/unreadable/malformed is a silent skip) and every shape
+    mismatch along the way (pluginConfigs not an object, an entry not an object,
+    options not an object) is likewise skipped rather than raised."""
+    for path in _claude_settings_paths():
+        data = _read_json_file(path)
+        if not data:
+            continue
+        plugin_configs = data.get("pluginConfigs")
+        if not isinstance(plugin_configs, dict):
+            continue
+        for name, entry in plugin_configs.items():
+            if not isinstance(name, str) or not name.startswith(PLUGIN_NAME_PREFIX):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            options = entry.get("options")
+            if isinstance(options, dict):
+                return options
+    return {}
+
+
+def _apply_known_settings(cfg, updates, source_label):
+    """Merge `updates` into `cfg`, keeping only known DEFAULTS keys with a
+    string value that passes the same enum validation `set`/env use -- an
+    unknown key is silently ignored (forward/backward compatible with a newer
+    plugin.json), and an invalid value for a known key warns to stderr and keeps
+    whatever `cfg` already had, exactly like an invalid env var does."""
+    for k, v in updates.items():
+        if k not in DEFAULTS:
+            continue
+        if not isinstance(v, str):
+            print(f"warning: {source_label} value for {k!r} is not a string ({v!r}) -- ignoring",
+                  file=sys.stderr)
+            continue
+        choices = ENUM_CHOICES.get(k)
+        if choices and v not in choices:
+            print(f"warning: {source_label} {k}={v!r} is not one of {', '.join(choices)} -- "
+                  f"ignoring it, using {cfg[k]!r}", file=sys.stderr)
+            continue
+        cfg[k] = v
 
 
 def load():
-    """Resolved settings: DEFAULTS -> config file -> environment."""
+    """Resolved settings: DEFAULTS -> plugin install-time options -> config file ->
+    environment (see the module docstring for why plugin options sit there)."""
     cfg = dict(DEFAULTS)
+    _apply_known_settings(cfg, _plugin_options(), "plugin install option")
     file_cfg = _read_config_file()
     for k, v in file_cfg.items():
         if k in DEFAULTS:
@@ -542,7 +631,11 @@ def _tier_row(*, active, setting, levels, installed_pred, size_hints,
 def status(cfg=None, det=None):
     """Machine-readable tier + upgrade info. Pure function of the cfg/det passed in
     (or the real load()/detect() if omitted) -- never re-derives them itself, so a
-    caller (e.g. --selftest) can hand it a hypothetical `det` shape."""
+    caller (e.g. --selftest) can hand it a hypothetical `det` shape.
+
+    `cfg` (when not passed in) is load()'s resolution: DEFAULTS -> plugin
+    install-time options -> our own config file -> environment, highest wins --
+    see the module docstring and load()."""
     cfg = load() if cfg is None else cfg
     det = detect() if det is None else det
 
@@ -647,6 +740,7 @@ def run_selftest():
 
     tracked_env = list(ENV_OVERRIDES) + [
         "PODCAST_CONFIG", "PODCAST_STATE_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        "CLAUDE_CONFIG_DIR",
     ]
     saved = {k: os.environ.get(k) for k in tracked_env}
 
@@ -673,6 +767,93 @@ def run_selftest():
             check("defaults: qa_level", cfg["qa_level"] == "auto")
             check("defaults: telegram_bot empty", cfg["telegram_bot"] == "")
             check("config_path() honors PODCAST_CONFIG", config_path() == cfg_path)
+
+            # -- resolution order: plugin install-time options override defaults,
+            # but our own config file (and env) still override THEM -- found by a
+            # full stranger validation, 2026-09-12: Claude Code stores userConfig
+            # install answers in its own settings files (pluginConfigs), never as
+            # env vars outside a hook, so config.py has to go read them itself. --
+            prev_cwd = os.getcwd()
+            claude_home = os.path.join(td, "claude-home")
+            os.makedirs(claude_home, exist_ok=True)
+            os.environ["CLAUDE_CONFIG_DIR"] = claude_home
+            os.chdir(td)  # no .claude/ here -- isolates from the real project's cwd
+            try:
+                def write_settings(options, marketplace="podcast-skill"):
+                    with open(os.path.join(claude_home, "settings.json"), "w", encoding="utf-8") as f:
+                        json.dump({"pluginConfigs": {f"podcast@{marketplace}": {"options": options}}}, f)
+
+                write_settings({"episodes_dir": "/tmp/EPISODES_PROBE", "voice_engine": "piper"})
+                cfg = load()
+                check("plugin option overrides default (episodes_dir)",
+                      cfg["episodes_dir"] == os.path.abspath("/tmp/EPISODES_PROBE"))
+                check("plugin option overrides default (voice_engine)", cfg["voice_engine"] == "piper")
+
+                # PODCAST_* env still wins over a plugin option.
+                os.environ["PODCAST_EPISODES_DIR"] = "/tmp/EPISODES_ENV_WINS"
+                check("env overrides plugin option",
+                      load()["episodes_dir"] == os.path.abspath("/tmp/EPISODES_ENV_WINS"))
+                del os.environ["PODCAST_EPISODES_DIR"]
+
+                # our own config file still wins over a plugin option (no env involved).
+                _atomic_write_json(cfg_path, {"voice_engine": "kokoro"})
+                check("our own config file overrides plugin option",
+                      load()["voice_engine"] == "kokoro")
+                os.remove(cfg_path)
+
+                # a differently-named marketplace is still matched by prefix.
+                write_settings({"qa_level": "small"}, marketplace="some-other-fork")
+                check("differently-named marketplace (podcast@some-other-fork) still matched",
+                      load()["qa_level"] == "small")
+
+                # unknown key ignored, invalid enum value warns and falls back, exactly
+                # like an invalid env var does.
+                write_settings({"qa_level": "extreme", "bogus_option": "x"})
+                stderr_buf = io.StringIO()
+                with contextlib.redirect_stderr(stderr_buf):
+                    cfg = load()
+                check("plugin option: unknown key ignored", "bogus_option" not in cfg)
+                check("plugin option: invalid enum value rejected, not adopted", cfg["qa_level"] != "extreme")
+                check("plugin option: invalid enum value falls back to default", cfg["qa_level"] == "auto")
+                check("plugin option: invalid enum value warns", "extreme" in stderr_buf.getvalue())
+
+                # a malformed settings.json (bad JSON) is a silent skip, not a crash.
+                with open(os.path.join(claude_home, "settings.json"), "w", encoding="utf-8") as f:
+                    f.write("{not valid json")
+                try:
+                    cfg = load()
+                    check("malformed Claude settings.json falls back to defaults, no crash",
+                          cfg["voice_engine"] == "auto")
+                except Exception as e:  # noqa: BLE001
+                    check(f"malformed Claude settings.json falls back to defaults, no crash (raised {e!r})", False)
+
+                # pluginConfigs present but the wrong shape (list instead of object,
+                # entry missing "options", options not an object) must not crash either.
+                for bad_shape, label in (
+                    ({"pluginConfigs": ["not", "a", "dict"]}, "pluginConfigs not an object"),
+                    ({"pluginConfigs": {"podcast@x": "not-a-dict"}}, "entry not an object"),
+                    ({"pluginConfigs": {"podcast@x": {"options": "not-a-dict"}}}, "options not an object"),
+                ):
+                    with open(os.path.join(claude_home, "settings.json"), "w", encoding="utf-8") as f:
+                        json.dump(bad_shape, f)
+                    try:
+                        cfg = load()
+                        check(f"malformed pluginConfigs shape tolerated: {label}", cfg["voice_engine"] == "auto")
+                    except Exception as e:  # noqa: BLE001
+                        check(f"malformed pluginConfigs shape tolerated: {label} (raised {e!r})", False)
+
+                # project-local settings (.claude/settings.local.json under cwd) are
+                # also checked, and outrank the user-level Claude settings file.
+                os.remove(os.path.join(claude_home, "settings.json"))
+                os.makedirs(os.path.join(td, ".claude"), exist_ok=True)
+                with open(os.path.join(td, ".claude", "settings.local.json"), "w", encoding="utf-8") as f:
+                    json.dump({"pluginConfigs": {"podcast@podcast-skill": {"options": {"voice_engine": "kokoro"}}}}, f)
+                check("project-local .claude/settings.local.json is also checked",
+                      load()["voice_engine"] == "kokoro")
+                os.remove(os.path.join(td, ".claude", "settings.local.json"))
+            finally:
+                os.chdir(prev_cwd)
+                del os.environ["CLAUDE_CONFIG_DIR"]
 
             # -- resolution order: config file overrides defaults --
             _atomic_write_json(cfg_path, {"voice_engine": "piper", "qa_level": "base"})

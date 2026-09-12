@@ -208,6 +208,35 @@ engine needs; (2) an error message that names the wrong subsystem costs more tha
 finds this class is one that starts from nothing — keep `test/stranger.sh` in CI-adjacent use, and always run it
 against a **fresh** state dir before publishing.
 
+## 7g. Stranger validation, stages 1-5 (2026-09-12)
+
+Installed the plugin from a path-based marketplace into a throwaway HOME and made a real episode through the
+**installed** plugin (not the working tree).
+
+- **Stage 1 install:** marketplace add + non-interactive `install -y --config …` both work; plugin shows enabled.
+- **Stage 2 tier 0:** produced brief, `sources.md`, 1,686-word script and three research files, then *offered* the
+  voice upgrade. Verification held up in a fresh environment: it corrected one of its own research agents (an Apple
+  "48,000 times per second" figure that actually describes a different feature) and hedged two popular myths
+  (Fogel "inventing" ANC; the Bose napkin story).
+- **Stage 3 upgrade:** `upgrade voice` installed piper (380 MB) and rendered 10.6 min of audio; `upgrade qa`
+  installed and QA ran, scoring 0.9645 and correctly failing on NAMES (ANC, Lueg, Olson, RCA) plus a NEGATION flag.
+  A first untuned episode failing QA on names is by design — the message tells the user the round-trip loop.
+- **Stage 4 containment:** the real state dir, project and config are byte-identical; nothing written outside the sandbox.
+- **Stage 5 quality:** spot-checked two "verified" claims by hand (Lueg patent title; Apple Adaptive Audio quote) —
+  both confirmed verbatim. Note the grep tool is literal: expanding "ANC" to "Active Noise Cancellation" made it miss.
+- **Stage 6 (not runnable here):** a genuine third-party install needs a collaborator on the private repo or going
+  public; macOS remains statically checked only.
+
+**Defects found:** (1) the plugin's `userConfig` answers are stored in Claude Code's settings under `pluginConfigs`
+but never reach the scripts — `CLAUDE_PLUGIN_OPTION_*` exists only in a *hook's* environment (verified: a session's
+Bash sees `NO_PLUGIN_VARS`), so `config.py` must read the settings file. Fix dispatched. (2) the skill told the model
+to background long renders, which in `claude -p` can end the session before the audio exists — SKILL.md now says to
+render in the foreground when non-interactive.
+
+**Operator trap (not a product bug):** a plugin's enabled state and its options live in `~/.claude/settings.json`.
+Overwriting that file (as I did when adding permissions) silently disables the plugin — `plugin list` shows
+`✘ disabled` and the skill simply vanishes from the session. Merge into that file, never replace it.
+
 ## 8. Known risks
 
 - ~~espeak-ng needed~~ — **disproved**: both engines bundle phonemization. `detect()` still reports it, informational only.
