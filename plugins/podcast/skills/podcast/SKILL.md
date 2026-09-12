@@ -85,7 +85,9 @@ headers like `# ── 3. The bit about money ─────` which become chap
 - Check the length before rendering: `python3 SCRIPTS/render.py <script> --dry-run`.
 
 ## 5. Render
-`python3 SCRIPTS/render.py <script> <out.mp3>` — run it in the background for a full episode. Exit **3** means no voice
+`python3 SCRIPTS/render.py <script> <out.mp3>` — for a full episode run it in the background **only in an interactive
+session**. In a non-interactive run (`claude -p`) the session can end before a backgrounded render finishes, leaving no
+audio; render in the foreground there. Exit **3** means no voice
 engine is installed: tell the user the script is ready and offer `upgrade voice`. Rendering is cached per line, so
 fixing a few lines re-renders only those.
 
