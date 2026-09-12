@@ -222,6 +222,25 @@ def select_engine(cli_engine, which_config=_UNSET):
     die('no voice engine installed — run: /podcast upgrade voice', 3)
 
 
+def resolve_ffmpeg(which_config=_UNSET):
+    """Absolute path to ffmpeg from config.detect()['ffmpeg'] (a bundled,
+    sudo-free copy in the state dir is preferred there over PATH), falling back
+    to the bare 'ffmpeg' name -- resolved via PATH at exec time, same as always
+    -- when config isn't importable, so a bare checkout with no config.py still
+    works exactly as it did before this existed. Does not itself verify the
+    result exists; a missing ffmpeg surfaces at the point of use (see the
+    FileNotFoundError handling around the actual subprocess.run call)."""
+    cfg = config if which_config is _UNSET else which_config
+    if cfg:
+        try:
+            path = cfg.detect().get('ffmpeg')
+        except Exception:
+            path = None
+        if path:
+            return path
+    return 'ffmpeg'
+
+
 def cache_key(engine_id, voice, sample_rate, speed, spoken_text):
     """The cache key folds in the engine id, its model/weights version, the voice
     name, and the sample rate -- so switching engines (or a voice/engine pairing
@@ -784,6 +803,47 @@ def run_selftest():
             check('...with a message naming the bad value', 'Kokoro' in err_buf.getvalue())
             check('...and exit code 2 (a bad config value, not "nothing installed")', e.code == 2)
 
+        # resolve_ffmpeg: config-supplied absolute path (a bundled, sudo-free copy)
+        # wins over the bare PATH-resolved name; absent config, the fallback is
+        # exactly what this script always shot at before ffmpeg resolution existed.
+        check('resolve_ffmpeg: uses the config-supplied absolute path when config has one',
+              resolve_ffmpeg(which_config=FakeConfig(detect_result={'ffmpeg': '/state/bin/ffmpeg'}))
+              == '/state/bin/ffmpeg')
+        check('resolve_ffmpeg: falls back to the bare name on PATH when config is absent',
+              resolve_ffmpeg(which_config=None) == 'ffmpeg')
+        check('resolve_ffmpeg: falls back to the bare name when config has nothing for it',
+              resolve_ffmpeg(which_config=FakeConfig(detect_result={})) == 'ffmpeg')
+        check('resolve_ffmpeg: a raising config.detect() falls back to the bare name rather than crashing',
+              resolve_ffmpeg(which_config=FakeConfig(raise_detect=True)) == 'ffmpeg')
+
+        # The three "can't render" exit-3 messages must all be textually distinct
+        # from one another -- a missing ffmpeg binary is neither "no voice engine"
+        # nor "audio runtime incomplete", and must not be confused with either.
+        ffmpeg_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(ffmpeg_buf):
+                die('ffmpeg not found — run: /podcast upgrade audio', 3)
+        except SystemExit:
+            pass
+        no_engine_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(no_engine_buf):
+                die('no voice engine installed — run: /podcast upgrade voice', 3)
+        except SystemExit:
+            pass
+        runtime_incomplete_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(runtime_incomplete_buf):
+                _runtime_import_die(ModuleNotFoundError("No module named 'soundfile'", name='soundfile'))
+        except SystemExit:
+            pass
+        three_messages = {ffmpeg_buf.getvalue(), no_engine_buf.getvalue(), runtime_incomplete_buf.getvalue()}
+        check('the ffmpeg-missing, no-voice-engine, and runtime-incomplete messages '
+              'are all three textually distinct', len(three_messages) == 3)
+        check('...the ffmpeg message names ffmpeg specifically',
+              'ffmpeg' in ffmpeg_buf.getvalue() and 'ffmpeg' not in no_engine_buf.getvalue()
+              and 'ffmpeg' not in runtime_incomplete_buf.getvalue())
+
         # LOW 8: an output path ending .wav collides with this render's own
         # intermediate WAV (ffmpeg would read and write the same file).
         wav_out = os.path.join(td, 'episode.wav')
@@ -1215,6 +1275,7 @@ def main():
         _runtime_import_die(e)
     import subprocess
 
+    ffmpeg_path = resolve_ffmpeg()
     engine = make_engine(engine_id, voices)
     sr = engine.sample_rate
     cache = args.cache or os.path.join(os.path.dirname(os.path.abspath(args.script)) or '.', '.tts-cache')
@@ -1296,8 +1357,16 @@ def main():
     audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
     wav = os.path.splitext(args.out)[0] + '.wav'
     sf.write(wav, audio, sr)
-    subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', wav, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
-                    '-ac', '1', '-b:a', '96k', args.out], check=True)
+    try:
+        subprocess.run([ffmpeg_path, '-y', '-loglevel', 'error', '-i', wav, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+                        '-ac', '1', '-b:a', '96k', args.out], check=True)
+    except FileNotFoundError:
+        # Distinct from "no voice engine installed" and "audio runtime incomplete"
+        # -- the engine and its Python runtime can both be fine while ffmpeg (a
+        # separate native binary, previously assumed to be on PATH) is what's
+        # missing. Named specifically so the fix is obvious rather than sending
+        # someone back down the voice-engine troubleshooting path.
+        die('ffmpeg not found — run: /podcast upgrade audio', 3)
     os.remove(wav)
     duration = len(audio) / sr
 

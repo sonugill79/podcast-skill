@@ -14,7 +14,8 @@ Resolution order for every setting, lowest to highest precedence:
      normal session (only inside a hook's env) -- see _plugin_options().
   3. the config file: ${XDG_CONFIG_HOME:-~/.config}/topic-podcast/config.json
   4. an environment variable (PODCAST_EPISODES_DIR, PODCAST_VOICE_ENGINE, PODCAST_QA_LEVEL,
-     PODCAST_TELEGRAM_BOT, PODCAST_LISTENER_PROFILE) -- set and non-empty wins outright.
+     PODCAST_TELEGRAM_BOT, PODCAST_LISTENER_PROFILE, PODCAST_AUTO_SETUP) -- set and
+     non-empty wins outright.
 Rationale for (2) sitting under our own config file and env: the install-time answer
 must beat a built-in default, but an explicit local file or env override -- something
 the user did on purpose, after the fact, on this machine -- should still win.
@@ -49,6 +50,12 @@ DEFAULTS = {
     "qa_level": "auto",
     "telegram_bot": "",
     "listener_profile": "",
+    # always: install whatever's missing (ffmpeg, then voice, then qa) in the
+    # background the moment an episode needs it -- no prompt, nothing to ask for.
+    # audio-only: same, but skip the qa model (ffmpeg + voice only).
+    # never: install nothing implicitly; the explicit `setup.sh install <component>`
+    # / "upgrade voice"/"upgrade qa" paths still work. See auto_setup_plan().
+    "auto_setup": "always",
 }
 
 # env var name -> settings key. An env var that is unset OR set to the empty string is
@@ -60,13 +67,16 @@ ENV_OVERRIDES = {
     "PODCAST_QA_LEVEL": "qa_level",
     "PODCAST_TELEGRAM_BOT": "telegram_bot",
     "PODCAST_LISTENER_PROFILE": "listener_profile",
+    "PODCAST_AUTO_SETUP": "auto_setup",
 }
 
 # Worst -> best, "none" always first. Used both to validate `set` and to pick the best
 # installed level under voice_engine=auto / qa_level=auto.
 VOICE_LEVELS = ["none", "piper", "kokoro"]
 QA_LEVELS = ["none", "base", "small", "medium"]
-ENUM_CHOICES = {"voice_engine": ["auto"] + VOICE_LEVELS, "qa_level": ["auto"] + QA_LEVELS}
+AUTO_SETUP_LEVELS = ["always", "audio-only", "never"]
+ENUM_CHOICES = {"voice_engine": ["auto"] + VOICE_LEVELS, "qa_level": ["auto"] + QA_LEVELS,
+                 "auto_setup": AUTO_SETUP_LEVELS}
 
 VOICE_LABELS = {"piper": "fast, smaller download", "kokoro": "best quality"}
 
@@ -86,6 +96,25 @@ VOICE_LABELS = {"piper": "fast, smaller download", "kokoro": "best quality"}
 # flagged "approx." below rather than presented as measured.
 VOICE_SIZE_HINTS = {"piper": "~375 MB", "kokoro": "~521 MB"}
 QA_SIZE_HINTS = {"base": "~575 MB", "small": "~950 MB (approx.)", "medium": "~1.9 GB (approx.)"}
+
+# Numeric (bytes) counterparts of the hints above, used by auto_setup_plan() to
+# total an estimated download before anything runs. DOWNLOAD = bytes over the
+# wire; DISK = final footprint once unpacked/installed -- these genuinely
+# differ (a review on 2026-09-12 measured ffmpeg's own static archive at
+# 150,109,916 bytes downloaded but 342,771,408 bytes once its two binaries are
+# unpacked -- 2.3x -- and called a single announced number that undersold the
+# true cost "the single thing most likely to make a user distrust the next
+# announcement"). ffmpeg's pair is exact, measured. voice/qa's DISK numbers are
+# the same measured *_SIZE_HINTS footprints as above; their DOWNLOAD numbers are
+# comment-flagged estimates (model files downloaded are measured/exact -- see
+# setup.sh's sha256 constants' sizes -- but the pip wheel portion of a fresh venv
+# is not, so these are not claimed as precisely measured the way ffmpeg's are).
+FFMPEG_DOWNLOAD_BYTES = 150_109_916
+FFMPEG_DISK_BYTES = 342_771_408
+VOICE_DOWNLOAD_BYTES = {"piper": 314_000_000, "kokoro": 474_000_000}  # approx.
+VOICE_DISK_BYTES = {"piper": 375_000_000, "kokoro": 521_000_000}
+QA_DOWNLOAD_BYTES = {"base": 528_000_000, "small": 870_000_000, "medium": 1_750_000_000}  # approx.
+QA_DISK_BYTES = {"base": 575_000_000, "small": 950_000_000, "medium": 1_900_000_000}
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +558,29 @@ def _resolve_active(levels, setting, installed_pred):
     return _best_installed(levels, installed_pred)
 
 
+def _ffmpeg_detect():
+    """(ffmpeg_path, ffprobe_path, source). source is "bundled" (our own
+    ffmpeg-static component -- a sudo-free static download under state_dir()/bin,
+    OR a `brew install ffmpeg` WE ran; either way found via installed.json, not
+    guessed from a path) or "system" (found on PATH) or None if neither exists.
+    Bundled always wins over PATH -- found by a real first-run report, 2026-09-12:
+    a user who can't sudo shouldn't have their own working install shadowed by a
+    broken/missing system one, and setup.sh's smoke test already proved the bundled
+    copy runs. setup.sh always records [ffmpeg_path, ffprobe_path] in that order in
+    the "ffmpeg-static" component -- see install_ffmpeg_static()."""
+    entry = _installed_record().get("ffmpeg-static")
+    if _component_files_ok(entry):
+        files = entry.get("files", [])
+        if len(files) >= 2:
+            sd = state_dir()
+            ffmpeg_p = files[0] if os.path.isabs(files[0]) else os.path.join(sd, files[0])
+            ffprobe_p = files[1] if os.path.isabs(files[1]) else os.path.join(sd, files[1])
+            return ffmpeg_p, ffprobe_p, "bundled"
+    ffmpeg_p = _which("ffmpeg")
+    ffprobe_p = _which("ffprobe")
+    return ffmpeg_p, ffprobe_p, ("system" if ffmpeg_p else None)
+
+
 def detect():
     """What is actually installed/available right now. Reads the real config (via
     load()) to resolve voice_active/qa_active against an explicit setting; callers
@@ -561,10 +613,12 @@ def detect():
     qa_active = _resolve_active(QA_LEVELS[1:], cfg["qa_level"], lambda lvl: lvl in qa_models)
 
     sd = state_dir()
+    ffmpeg_path, ffprobe_path, ffmpeg_source = _ffmpeg_detect()
     return {
         "python": ".".join(str(p) for p in sys.version_info[:3]),
-        "ffmpeg": _which("ffmpeg"),
-        "ffprobe": _which("ffprobe"),
+        "ffmpeg": ffmpeg_path,
+        "ffprobe": ffprobe_path,
+        "ffmpeg_source": ffmpeg_source,  # "bundled" | "system" | None
         # Verified 2026-09-12: neither piper-tts 1.8.0 nor kokoro-onnx 0.6.1 need this
         # installed system-wide (piper embeds its own phonemization data; kokoro-onnx
         # pulls in the `espeakng-loader` wheel, which ships the shared library). Kept
@@ -586,6 +640,107 @@ def detect():
         "state_dir_error": _dir_problem(sd),
         "venv": venv_python(),
     }
+
+
+# ---------------------------------------------------------------------------
+# auto_setup: what would be installed automatically, right now, and why
+# ---------------------------------------------------------------------------
+
+#: The only scope values `only=` accepts, besides None (no narrowing). Anything
+#: else is a caller error, not a value to silently ignore -- see auto_setup_plan().
+AUTO_SETUP_ONLY_VALUES = ("audio",)
+
+
+def auto_setup_plan(cfg=None, det=None, only=None):
+    """What auto_setup should do right now: which components are missing and
+    should be installed automatically, in priority order (ffmpeg, then voice, then
+    qa), and the estimated total download AND disk cost. This is the SINGLE
+    source of truth for that decision -- setup.sh's `autosetup` calls
+    `config.py plan` for it (via this function) rather than re-implementing the
+    logic in bash, so the plan `status --json` reports and the plan actually
+    executed can never drift apart.
+
+    Respects auto_setup itself ("never" installs nothing, full stop) and each
+    setting's own explicit choice: voice_engine/qa_level == "none" is skipped even
+    under "always" (an explicit opt-out beats an implicit install), and an explicit
+    engine/level (not "auto") is what gets installed, not always the cheapest one.
+    Only fills in what's completely MISSING (voice_active/qa_active is None) --
+    this is "get a stranger to a working baseline", not "upgrade piper to kokoro".
+
+    `only="audio"` narrows scope to ffmpeg+voice for this call, same as
+    `autosetup --only audio` -- except "never" always wins regardless, since
+    installing nothing implicitly is the user's explicit choice, not something a
+    scope flag should override.
+
+    HIGH4 (found by review, 2026-09-12): `only` used to be compared with
+    `== "audio"` and anything else silently fell through to NO narrowing at all
+    -- `--only qa`, `--only voice`, even a typo like `--only Audio`, installed
+    EVERYTHING (~1.1 GB), silently. `only` is now validated: None means "no
+    narrowing" (the normal case), "audio" narrows, anything else raises
+    ValueError rather than being quietly treated as either of those. The CLI
+    (`config.py plan`, and setup.sh's `--only` parsing) catches the caller-facing
+    version of this and exits 2 naming the valid values; this function raising is
+    what makes that possible instead of the bad value just evaporating here.
+
+    Returns:
+      {"mode": <configured auto_setup value>,
+       "effective_mode": <mode, narrowed by `only` if applicable>,
+       "user_said_never": bool,
+       "components": [{"component": "ffmpeg-static"|"voice-piper"|"voice-kokoro"|
+                        "qa-base"|"qa-small"|"qa-medium", "kind": "ffmpeg"|"voice"|"qa",
+                        "target": <engine/level name>,
+                        "bytes": <int, disk footprint estimate>,
+                        "download_bytes": <int, wire estimate -- smaller, sometimes
+                                           much smaller, than "bytes"; see
+                                           FFMPEG_DOWNLOAD_BYTES/FFMPEG_DISK_BYTES>},
+                       ...],
+       "total_bytes": <int, sum of "bytes">,
+       "total_download_bytes": <int, sum of "download_bytes">}
+    components is empty (and both totals 0) whenever there's nothing to do,
+    whether because auto_setup=never or because everything needed is already
+    installed -- check "user_said_never" to tell those two apart."""
+    if only is not None and only not in AUTO_SETUP_ONLY_VALUES:
+        raise ValueError(f"only must be one of {AUTO_SETUP_ONLY_VALUES} or None, got {only!r}")
+
+    cfg = load() if cfg is None else cfg
+    det = detect() if det is None else det
+
+    mode = cfg.get("auto_setup", "always")
+    if mode not in AUTO_SETUP_LEVELS:
+        mode = "always"
+    effective_mode = "audio-only" if (only == "audio" and mode == "always") else mode
+
+    result = {"mode": mode, "effective_mode": effective_mode,
+              "user_said_never": mode == "never", "components": [],
+              "total_bytes": 0, "total_download_bytes": 0}
+    if effective_mode == "never":
+        return result
+
+    def add(component, kind, target, disk_bytes, download_bytes):
+        result["components"].append({"component": component, "kind": kind, "target": target,
+                                      "bytes": disk_bytes, "download_bytes": download_bytes})
+        result["total_bytes"] += disk_bytes
+        result["total_download_bytes"] += download_bytes
+
+    if not det.get("ffmpeg"):
+        add("ffmpeg-static", "ffmpeg", "ffmpeg", FFMPEG_DISK_BYTES, FFMPEG_DOWNLOAD_BYTES)
+
+    voice_engine = cfg.get("voice_engine", "auto")
+    if det.get("voice_active") is None and voice_engine != "none":
+        target = voice_engine if voice_engine in VOICE_LEVELS[1:] else "piper"
+        add(f"voice-{target}", "voice", target,
+            VOICE_DISK_BYTES.get(target, VOICE_DISK_BYTES["piper"]),
+            VOICE_DOWNLOAD_BYTES.get(target, VOICE_DOWNLOAD_BYTES["piper"]))
+
+    if effective_mode == "always":
+        qa_level = cfg.get("qa_level", "auto")
+        if det.get("qa_active") is None and qa_level != "none":
+            target = qa_level if qa_level in QA_LEVELS[1:] else "base"
+            add(f"qa-{target}", "qa", target,
+                QA_DISK_BYTES.get(target, QA_DISK_BYTES["base"]),
+                QA_DOWNLOAD_BYTES.get(target, QA_DOWNLOAD_BYTES["base"]))
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -679,12 +834,28 @@ def status(cfg=None, det=None):
         delivery = {"mode": "local", "state": f"local file ({cfg.get('episodes_dir')})",
                     "note": 'Say "configure telegram" to send episodes to Telegram.'}
 
+    # ffmpeg: always shown (not just when missing), so a user can tell a bundled
+    # (sudo-free, our own state dir) copy from a system one -- found by a real
+    # first-run report, 2026-09-12: the old banner only spoke up when ffmpeg was
+    # missing, and even then just pointed at `sudo`, which the user couldn't run.
+    ffmpeg_source = det.get("ffmpeg_source")
+    if ffmpeg_ok:
+        ffmpeg_row = {"state": ffmpeg_source or "found", "path": det.get("ffmpeg"),
+                      "note": f"{det.get('ffmpeg')} ({ffmpeg_source})."}
+    else:
+        ffmpeg_row = {
+            "state": "missing", "path": None,
+            "note": f'Say "install ffmpeg" for a sudo-free static build (~{FFMPEG_DOWNLOAD_BYTES // 1_000_000} MB '
+                     f'download, ~{FFMPEG_DISK_BYTES // 1_000_000} MB on disk, no admin needed) -- or, if you '
+                     'have it: brew install ffmpeg | sudo apt install ffmpeg.',
+        }
+
     warnings = []
     if not ffmpeg_ok:
         warnings.append({
             "component": "ffmpeg",
             "message": "missing -- required for audio.",
-            "fix": "brew install ffmpeg | sudo apt install ffmpeg",
+            "fix": "setup.sh install ffmpeg-static --yes   (no sudo) | brew install ffmpeg | sudo apt install ffmpeg",
         })
     state_dir_error = det.get("state_dir_error")
     if state_dir_error:
@@ -695,7 +866,20 @@ def status(cfg=None, det=None):
                    "export PODCAST_STATE_DIR=~/.topic-podcast",
         })
 
-    return {"voice": voice, "qa": qa, "delivery": delivery, "warnings": warnings, "ok": not warnings}
+    # auto_setup: what the skill needs to decide whether/what to fetch in the
+    # background before rendering an episode -- what's missing, the estimated
+    # total download, and whether the user has already said "never" (in which case
+    # the skill must not fetch anything without being asked).
+    plan = auto_setup_plan(cfg, det)
+    auto_setup_info = {
+        "mode": plan["mode"],
+        "user_said_never": plan["user_said_never"],
+        "missing": [c["component"] for c in plan["components"]],
+        "total_bytes": plan["total_bytes"],
+    }
+
+    return {"voice": voice, "qa": qa, "delivery": delivery, "ffmpeg": ffmpeg_row,
+            "auto_setup": auto_setup_info, "warnings": warnings, "ok": not warnings}
 
 
 def format_status(cfg=None, det=None):
@@ -716,7 +900,12 @@ def format_status(cfg=None, det=None):
     d = s["delivery"]
     lines.append(row("Delivery", d["state"], d["note"]))
 
+    f = s["ffmpeg"]
+    lines.append(row("ffmpeg", f["state"], f["note"]))
+
     for w in s["warnings"]:
+        if w["component"] == "ffmpeg":
+            continue  # already shown via the dedicated ffmpeg row above
         lines.append(row(w["component"], w["message"], f"Install: {w['fix']}"))
 
     return "\n".join(lines)
@@ -1279,6 +1468,160 @@ def run_selftest():
                 _PROBE_CACHE.clear()
                 del os.environ["PODCAST_STATE_DIR"]
 
+            # -- auto_setup: default, validation, and auto_setup_plan() --
+            check("defaults: auto_setup", load()["auto_setup"] == "always")
+            os.environ["PODCAST_AUTO_SETUP"] = "bogus"
+            stderr_buf = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buf):
+                cfg_bad_auto = load()
+            check("invalid PODCAST_AUTO_SETUP rejected, falls back", cfg_bad_auto["auto_setup"] == "always")
+            check("invalid PODCAST_AUTO_SETUP warns", "bogus" in stderr_buf.getvalue())
+            del os.environ["PODCAST_AUTO_SETUP"]
+            os.environ["PODCAST_AUTO_SETUP"] = "audio-only"
+            check("PODCAST_AUTO_SETUP=audio-only accepted", load()["auto_setup"] == "audio-only")
+            del os.environ["PODCAST_AUTO_SETUP"]
+
+            # shape()'s own default has a present ffmpeg (most of the earlier tests
+            # in this file want that baseline) -- these plan tests want a machine
+            # with truly nothing at all, ffmpeg included.
+            nothing_det = shape(ffmpeg=None, ffprobe=None)
+            everything_det = shape(
+                voice={"piper": True, "kokoro": False}, voice_active="piper",
+                qa={"whisper_cli": None, "faster_whisper": True, "models": ["base"]}, qa_active="base")
+
+            plan = auto_setup_plan(dict(base_cfg, auto_setup="always"), nothing_det)
+            names = [c["component"] for c in plan["components"]]
+            check("plan(always, nothing installed): ffmpeg first",
+                  names and names[0] == "ffmpeg-static")
+            check("plan(always, nothing installed): voice-piper next", "voice-piper" in names)
+            check("plan(always, nothing installed): qa-base last", names and names[-1] == "qa-base")
+            check("plan(always): total_bytes is the sum of its components",
+                  plan["total_bytes"] == sum(c["bytes"] for c in plan["components"]))
+
+            plan_audio = auto_setup_plan(dict(base_cfg, auto_setup="audio-only"), nothing_det)
+            check("plan(audio-only): no qa component",
+                  not any(c["kind"] == "qa" for c in plan_audio["components"]))
+            check("plan(audio-only): still wants ffmpeg + voice",
+                  {"ffmpeg", "voice"} == {c["kind"] for c in plan_audio["components"]})
+
+            plan_never = auto_setup_plan(dict(base_cfg, auto_setup="never"), nothing_det)
+            check("plan(never): installs nothing", plan_never["components"] == [])
+            check("plan(never): user_said_never is True", plan_never["user_said_never"] is True)
+            check("plan(audio-only): user_said_never is False", plan_audio["user_said_never"] is False)
+
+            plan_only = auto_setup_plan(dict(base_cfg, auto_setup="always"), nothing_det, only="audio")
+            check("plan(always, --only audio): narrows to audio-only for this call",
+                  plan_only["effective_mode"] == "audio-only" and plan_only["mode"] == "always")
+            plan_only_never = auto_setup_plan(dict(base_cfg, auto_setup="never"), nothing_det, only="audio")
+            check("plan(never, --only audio): never still wins", plan_only_never["components"] == [])
+
+            # -- HIGH4: an unrecognized `only` must be a loud error, never silent
+            # no-op-that-widens-scope (found by review, 2026-09-12: `--only qa`,
+            # `--only voice`, `--only Audio` all used to silently install
+            # everything, ~1.1 GB, because only the literal "audio" was checked
+            # and anything else fell through to no narrowing at all). --
+            for bad_only in ("qa", "voice", "Audio", "ffmpeg"):
+                try:
+                    auto_setup_plan(base_cfg, nothing_det, only=bad_only)
+                    check(f"HIGH4: auto_setup_plan(only={bad_only!r}) raises instead of silently widening scope",
+                          False)
+                except ValueError:
+                    check(f"HIGH4: auto_setup_plan(only={bad_only!r}) raises ValueError", True)
+            try:
+                auto_setup_plan(base_cfg, nothing_det, only="")
+                check("HIGH4: auto_setup_plan(only='') raises instead of silently widening scope", False)
+            except ValueError:
+                check("HIGH4: auto_setup_plan(only='') raises ValueError", True)
+            check("HIGH4: auto_setup_plan(only=None) is still the normal, unnarrowed case",
+                  auto_setup_plan(base_cfg, nothing_det, only=None)["effective_mode"] == "always")
+
+            # -- MED: the announced download must not undersell the real disk
+            # cost (found by review: ffmpeg's own archive is ~150 MB downloaded
+            # but ~343 MB once unpacked -- 2.3x -- and a total that only ever
+            # quoted one number was "the single thing most likely to make a user
+            # distrust the next announcement"). --
+            plan_bytes = auto_setup_plan(dict(base_cfg, auto_setup="always"), nothing_det)
+            check("MED: plan() reports both total_bytes (disk) and total_download_bytes (wire)",
+                  "total_download_bytes" in plan_bytes and "total_bytes" in plan_bytes)
+            ffmpeg_entry = next(c for c in plan_bytes["components"] if c["component"] == "ffmpeg-static")
+            check("MED: ffmpeg's disk estimate is measurably larger than its download estimate",
+                  ffmpeg_entry["bytes"] > ffmpeg_entry["download_bytes"] > 0)
+            check("MED: ffmpeg's numbers match the real measured sizes (150,109,916 / 342,771,408)",
+                  ffmpeg_entry["download_bytes"] == 150_109_916 and ffmpeg_entry["bytes"] == 342_771_408)
+            check("MED: total_download_bytes is the sum of each component's download_bytes",
+                  plan_bytes["total_download_bytes"] == sum(c["download_bytes"] for c in plan_bytes["components"]))
+
+            # -- HIGH4 acceptance test at the actual CLI boundary (not just the
+            # function): `config.py plan --only qa` (or any non-"audio" value)
+            # must exit 2 naming the valid values, not exit 0 with a full plan. --
+            for bad_only in ("qa", "voice", "Audio"):
+                r = subprocess.run([sys.executable, os.path.abspath(__file__), "plan", "--only", bad_only],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+                                    env=dict(os.environ, PODCAST_CONFIG=cfg_path, PODCAST_STATE_DIR=state_path))
+                check(f"HIGH4 CLI: 'plan --only {bad_only}' exits 2", r.returncode == 2)
+                check(f"HIGH4 CLI: 'plan --only {bad_only}' names the valid values in its error",
+                      "audio" in r.stderr.lower())
+            r_ok = subprocess.run([sys.executable, os.path.abspath(__file__), "plan", "--only", "audio"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+                                   env=dict(os.environ, PODCAST_CONFIG=cfg_path, PODCAST_STATE_DIR=state_path))
+            check("HIGH4 CLI: 'plan --only audio' (the one valid value) exits 0", r_ok.returncode == 0)
+
+            plan_off = auto_setup_plan(dict(base_cfg, auto_setup="always", voice_engine="none", qa_level="none"),
+                                        nothing_det)
+            check("plan(always): explicit voice_engine=none is still skipped",
+                  not any(c["kind"] == "voice" for c in plan_off["components"]))
+            check("plan(always): explicit qa_level=none is still skipped",
+                  not any(c["kind"] == "qa" for c in plan_off["components"]))
+            check("plan(always): ffmpeg is unaffected by voice/qa=none",
+                  any(c["kind"] == "ffmpeg" for c in plan_off["components"]))
+
+            plan_kokoro = auto_setup_plan(dict(base_cfg, auto_setup="always", voice_engine="kokoro"), nothing_det)
+            voice_targets = [c["target"] for c in plan_kokoro["components"] if c["kind"] == "voice"]
+            check("plan(always): explicit voice_engine=kokoro targets kokoro, not the piper default",
+                  voice_targets == ["kokoro"])
+
+            plan_satisfied = auto_setup_plan(dict(base_cfg, auto_setup="always"), everything_det)
+            check("plan(always, everything already installed): nothing to do",
+                  plan_satisfied["components"] == [] and plan_satisfied["total_bytes"] == 0)
+
+            # -- ffmpeg detection: bundled (our own state dir) wins over PATH --
+            state6 = os.path.join(td, "state6")
+            os.environ["PODCAST_STATE_DIR"] = state6
+            try:
+                bin_dir = os.path.join(state6, "bin")
+                os.makedirs(bin_dir, exist_ok=True)
+                fake_ffmpeg = os.path.join(bin_dir, "ffmpeg")
+                fake_ffprobe = os.path.join(bin_dir, "ffprobe")
+                for p in (fake_ffmpeg, fake_ffprobe):
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write("x")
+                _atomic_write_json(os.path.join(state6, "installed.json"), {
+                    "ffmpeg-static": {"ok": True, "requires_venv": False,
+                                       "files": ["bin/ffmpeg", "bin/ffprobe"]},
+                })
+                ffmpeg_p, ffprobe_p, source = _ffmpeg_detect()
+                check("ffmpeg detection: bundled copy found", source == "bundled")
+                check("ffmpeg detection: bundled paths are absolute and under state dir",
+                      ffmpeg_p == fake_ffmpeg and ffprobe_p == fake_ffprobe)
+
+                det_bundled = detect()
+                check("detect(): ffmpeg_source is 'bundled'", det_bundled["ffmpeg_source"] == "bundled")
+                out_bundled = format_status(base_cfg, det_bundled)
+                check("format_status(): shows 'bundled' for ffmpeg",
+                      "ffmpeg" in out_bundled.lower() and "bundled" in out_bundled.lower())
+
+                # remove the bundled record (e.g. requires_venv=False means it does
+                # NOT depend on the venv -- deleting the venv must not affect it,
+                # only deleting/uninstalling ffmpeg-static itself should)
+                os.remove(os.path.join(state6, "installed.json"))
+                ffmpeg_p2, ffprobe_p2, source2 = _ffmpeg_detect()
+                sys_ffmpeg = shutil.which("ffmpeg")
+                expected_source = "system" if sys_ffmpeg else None
+                check("ffmpeg detection: falls back to system PATH once bundled record is gone",
+                      source2 == expected_source and ffmpeg_p2 == sys_ffmpeg)
+            finally:
+                del os.environ["PODCAST_STATE_DIR"]
+
     finally:
         restore_env()
 
@@ -1333,9 +1676,21 @@ def main(argv=None):
         print(json.dumps(new_cfg, indent=2, sort_keys=True))
     elif cmd == "path":
         print(config_path())
+    elif cmd == "plan":
+        only = None
+        for i, a in enumerate(rest):
+            if a == "--only" and i + 1 < len(rest):
+                only = rest[i + 1]
+        # HIGH4: an unrecognized --only value must be a loud, named error, not a
+        # silent "well then I guess no narrowing" that installs everything.
+        if only is not None and only not in AUTO_SETUP_ONLY_VALUES:
+            print(f"error: --only expects one of {', '.join(AUTO_SETUP_ONLY_VALUES)}, got {only!r}",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps(auto_setup_plan(only=only), indent=2))
     else:
         print(f"error: unknown command {cmd!r}", file=sys.stderr)
-        print("usage: config.py [status [--json] | set key=value ... | path | --selftest]",
+        print("usage: config.py [status [--json] | set key=value ... | path | plan [--only audio] | --selftest]",
               file=sys.stderr)
         sys.exit(2)
 

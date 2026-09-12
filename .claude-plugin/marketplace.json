@@ -11,7 +11,7 @@
       "name": "podcast",
       "source": "./plugins/podcast",
       "description": "Research a topic, verify the claims, write a two-host script, render it to audio locally, and check the result.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": {
         "name": "Sonu Gill"
       }
