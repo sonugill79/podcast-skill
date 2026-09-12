@@ -16,6 +16,15 @@ Nothing is sent anywhere. Research uses ordinary web requests; the voice and the
 You'll be asked a few questions (where to save episodes, which voice, optional Telegram). Change them any time with
 `/plugin configure podcast@podcast-skill`.
 
+**Prefer to just ask?** Paste this to Claude and it will do the install for you:
+
+> Please install the podcast plugin for me. Add the marketplace `sonugill79/podcast-skill`, then install
+> `podcast@podcast-skill`. Set `episodes_dir` to `~/podcast-episodes` and leave the rest at their defaults. Show me
+> the result of `claude plugin list` when you're done, and remind me to restart my session.
+
+Claude will ask permission the first time it runs each command. Both routes do exactly the same thing — the slash
+commands above are the built-in path, the prompt is a convenience.
+
 **Restart your session after installing.** Skills are loaded when a session starts, so `/podcast` won't exist in the
 session you installed from — quit, start Claude again, and it's there.
 
