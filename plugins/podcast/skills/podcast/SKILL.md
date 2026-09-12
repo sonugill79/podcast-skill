@@ -1,0 +1,117 @@
+---
+name: podcast
+description: Research any topic and turn it into a verified, two-host, podcast-style audio episode generated on this machine. Parallel research agents gather sources, the load-bearing claims are re-checked against primary sources, a script is written for the ear, local text-to-speech renders it, and a transcription round-trip catches dropped or garbled audio. Four angles are available, interview-prep (a company and role before an interview), learn-topic (understand any subject), company-diligence (a company as investor, partner or competitor) and product-research (evaluate a tool before buying or adopting). Works with nothing installed by writing the script; voices and audio QA are optional upgrades the user asks for by name. Use when someone asks for a podcast, an audio briefing or deep-dive, something to listen to, or interview prep, company research or a product evaluation as audio.
+---
+
+# Podcast: topic → verified research → two-host script → audio
+
+`SCRIPTS` below means the `scripts/` directory next to this file. When running inside a plugin that is
+`${CLAUDE_PLUGIN_ROOT}/skills/podcast/scripts`. Angle playbooks are in `angles/`, starter files in `templates/`.
+
+Always call the scripts with plain `python3` / `bash` as written here. They find their own runtime: anything needing
+installed packages re-executes itself inside the managed environment. If a script exits **3**, nothing is installed for
+that step — relay its one-line message to the user as an offer, and carry on with the rest of the episode.
+
+## Step 0 — always start here
+
+Run `bash SCRIPTS/setup.sh status` and **show the user its output**, then say in one line what will happen this run
+and what they could upgrade. Never make them ask. For example:
+
+> Voice: not installed, so I'll write the script but not the audio. Say **upgrade voice** for a real episode
+> (≈375 MB, well under a minute on a decent connection).
+
+Then continue with the episode. **Never block on an upgrade**; a script-only episode is a real deliverable.
+
+Handle these phrases whenever they appear, before or during an episode:
+
+| The user says | Do this |
+|---|---|
+| `upgrade voice` | `bash SCRIPTS/setup.sh install voice-piper` (≈375 MB) or `voice-kokoro` (better voices, larger) — offer the choice; the installer prints exact sizes |
+| `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (≈575 MB); `qa-small` and `qa-medium` are more accurate and larger |
+| `configure telegram` | Explain that it needs `~/.config/telegram-send/bots.json`, then set `telegram_bot` with `python3 SCRIPTS/config.py set telegram_bot=<name>` |
+| `status`, "what do I have" | `bash SCRIPTS/setup.sh status` |
+| something is broken | `bash SCRIPTS/setup.sh doctor` |
+
+After any upgrade, **continue from where you were** — if a script already exists, render it; don't redo research.
+Setup exit code 3 means the user must install a system package themselves; relay the exact command it printed.
+
+## Invocation
+
+`/podcast <topic> [--angle interview-prep|learn-topic|company-diligence|product-research] [--minutes N] [--depth quick|standard|deep] [--personal] [--no-deliver]`
+
+- **Angle:** infer it ("interviewing at X" → interview-prep, "should we use X" → product-research, "X as an
+  investment" → company-diligence, otherwise learn-topic). Ask only if genuinely ambiguous.
+- **Depth:** quick = 3 research agents, ~8 verified claims, ~10 min. standard (default) = 5 agents, ~20 claims,
+  ~20 min. deep = standard plus an adversarial reviewer, ~25 min.
+- **`--personal`:** only with this flag may you read the user's mail or calendar, only for this episode, and record
+  that you did in the brief.
+
+**Cost:** research, verification and the script spend model tokens; audio and QA are free and local. One request =
+one episode. Never batch topics or schedule episodes without being asked.
+
+## 1. Brief
+Episodes live in the configured folder (`python3 SCRIPTS/config.py status --json` → `episodes_dir`), one directory per
+episode named `<topic-slug>-<yyyy-mm>`. Write `brief.md`: topic, angle, depth, minutes, date, the listener's goal, and
+whether any personal sources were used. If a listener profile is configured, read it and write for that person by
+name; otherwise write for a general audience.
+
+## 2. Research
+Read `angles/<angle>.md` for the research areas, then launch **all agents in one message** (model: sonnet), one per
+area, each writing `research/0N-<area>.md`. Require of every agent: a source URL and a tag (`[primary]`,
+`[secondary]`, `[snippet]`) on each claim, a "conflicts and couldn't verify" section, no logins or paywall
+circumvention, and a date on every figure.
+
+## 3. Verify — do this yourself, never delegate
+This is what makes an episode trustworthy.
+1. List the load-bearing claims: every number, date, name and quote the script will say, plus the angle's must-verify list.
+2. Check each against a primary source. For anything quoted verbatim use
+   `python3 SCRIPTS/rawfetch.py <url> --grep "exact phrase"` (0 = found, 1 = not found, 2 = fetch error). Summarising
+   fetch tools paraphrase; a quote that isn't on the page is the failure this step exists to catch.
+3. Check what each quote was *about* before repeating the researcher's framing.
+4. Flag numbers that are true but misleading (one-off items inflating a profit, a placeholder in a structured field).
+5. Resolve disagreements between research files yourself; if unresolved, say so on air.
+Write `sources.md` with: **Verified** (claim + source), **Reported, not re-verified**, **Don't air**, and anything to
+re-check before a deadline.
+
+## 4. Script
+`script.txt`: `MAYA:` / `ALEX:` lines, `---` for a segment break, `[pause N]` for silence, `#` comments, and chapter
+headers like `# ── 3. The bit about money ─────` which become chapter markers.
+- Follow the angle's segment outline. Budget **minutes × 153 words**.
+- Write for the ear: short sentences, one idea per line, numbers spelled out ("four hundred ninety-five million"),
+  "quote" before verbatim text with attribution, hosts who clarify and disagree.
+- Say plainly what could not be verified. Label allegations and anonymous claims as such.
+- Keep correct spellings. Pronunciation fixes live in `lexicon.txt` **in the episode's own folder** (seed it from
+  `templates/lexicon.txt` when you first need one); `qa-ignore.txt` sits beside it. The scripts look there by default.
+- Check the length before rendering: `python3 SCRIPTS/render.py <script> --dry-run`.
+
+## 5. Render
+`python3 SCRIPTS/render.py <script> <out.mp3>` — run it in the background for a full episode. Exit **3** means no voice
+engine is installed: tell the user the script is ready and offer `upgrade voice`. Rendering is cached per line, so
+fixing a few lines re-renders only those.
+
+## 6. QA
+`python3 SCRIPTS/qa.py <script> <out.mp3>` compares the audio against the script and fails on: DROPPED or TRUNCATED
+lines, MISSING runs of 4+ words, EXTRA AUDIO (repeats, wrong-line audio), misheard NAMES, lost or added NEGATIONS, or
+coverage below 0.96. Exit 3 means QA isn't installed — offer `upgrade qa`.
+- Structural failures mean **re-render**, never an ignore rule.
+- For a NAMES flag, render the word alone and transcribe it: if the voice is wrong add a `lexicon.txt` rule and
+  re-render; if only the transcriber is wrong add a `qa-ignore.txt` pair.
+- Numbers are not QA'd (the script spells them, the transcriber writes digits) — check numeric lines against `sources.md`.
+
+## 7. Deliver and close
+Tell the user where the file is. If `telegram_bot` is configured, `python3 SCRIPTS/deliver.py <out.mp3> --bot <name>`
+sends it behind a privacy gate that refuses any chat beyond the owner and the bot (exit 3). Never pass
+`--allow-shared` unless explicitly asked. Chapter times come from the generated `chapters.json` — never estimate them.
+Finish by appending an outcome to `brief.md`: length, QA coverage, and anything learned.
+
+## Failure modes already seen
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A quote isn't on the page | a summarising fetch paraphrased it | `rawfetch.py --grep` |
+| Salary or price reads like a placeholder | structured job/product data is often boilerplate | take it from the page text |
+| A transcript "confirms" a phrase spanning two list items | text joined across block boundaries | already guarded; re-check with `--grep` |
+| Voice mangles a name | pronunciation | `lexicon.txt` rule, then re-render |
+| Transcriber misspells a name the voice said correctly | transcription quirk | `qa-ignore.txt` pair |
+| Chapter times wrong | estimated by hand | use `chapters.json` |
+| Research files contradict each other | different source vintages | verify yourself; air the hedged version |

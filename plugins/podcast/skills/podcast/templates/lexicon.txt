@@ -1,0 +1,10 @@
+# Pronunciation lexicon — applied to dialogue before text-to-speech.
+# Format: written => spoken     (whole word, case-sensitive, longest match first)
+#
+# Scripts keep the correct spelling; this file only changes what the voice says.
+# Add a rule ONLY after rendering the word on its own and hearing it wrong — if the voice is right and only the
+# transcriber misspells it, add a pair to qa-ignore.txt instead.
+#
+# Examples (delete these):
+# S-team => ess team
+# GIF => jif

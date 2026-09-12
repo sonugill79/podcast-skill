@@ -1,0 +1,37 @@
+name: validate
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+
+      - name: Manifests are well formed
+        run: python3 .github/check_manifests.py
+
+      - name: Script selftests (no third-party packages installed)
+        run: |
+          cd plugins/podcast/skills/podcast/scripts
+          for s in config.py render.py qa.py rawfetch.py deliver.py; do
+            echo "=== $s"; python3 "$s" --selftest
+          done
+
+      - name: Installer is syntactically valid and has no bashisms beyond bash 3.2
+        run: |
+          bash -n plugins/podcast/skills/podcast/scripts/setup.sh
+          ! grep -nE 'declare -A|\$\{[a-zA-Z_]+\^\^\}|\bmapfile\b|readarray' \
+              plugins/podcast/skills/podcast/scripts/setup.sh
+
+      - name: No personal data
+        # Author attribution in the manifests is intentional; everything else that names a person,
+        # employer, project, chat or home directory is a leak from the private source project.
+        run: |
+          hits=$(grep -rinE 'sonu|gill|remitly|oportun|trippits|finance-lens|shilshole|dmitri|digesting|@gmail|/home/[a-z]+' \
+                   --exclude-dir=.git --exclude=PLAN.md --exclude=CLAUDE.md --exclude=LICENSE \
+                   --exclude=validate.yml . \
+                 | grep -vE '\.claude-plugin/(marketplace|plugin)\.json:[0-9]+: *"?(name|owner|author|homepage)"?' || true)
+          if [ -n "$hits" ]; then echo "$hits"; exit 1; fi
+          echo "no personal data outside attribution"

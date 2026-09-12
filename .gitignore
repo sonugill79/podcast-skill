@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# episodes are the user's own content; never commit them
+episodes/
+# local test scratch
+.tts-cache/
+*.mp3
+*.wav
