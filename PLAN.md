@@ -3,8 +3,9 @@
 **Goal:** package the working `/podcast` pipeline (currently welded to one machine) as a Claude Code plugin that a
 stranger can install and use immediately, with heavier capability arriving as *named upgrades* they ask for.
 
-**Status:** v0.1 in progress, 2026-09-12. Repo is local-only (`git init`, no remote yet) and **must stay private until
-the privacy gate below passes**.
+**Status:** **v0.1 shipped 2026-09-12** to the private repo `sonugill79/podcast-skill` (commit `dfbe00c`).
+Privacy gate passed; stranger test passes end to end. **Still private** — going public is a separate decision the
+owner makes after real use (see section 5, item 10).
 
 ---
 
@@ -91,8 +92,15 @@ exit 2 = tool error. `deliver.py`: 3 privacy gate refused, 4 over 50 MB, 5 bad c
 6. **CI** - `claude plugin validate --strict` + four `--selftest` suites.
 7. **Review one tier up (Opus)** of the builders' code, as with the original scripts.
 8. **Stranger test** (section 7).
-9. **Privacy gate** (section 6) -> create the private GitHub repo -> push.
-10. Only after real use: consider making it public.
+9. ~~Privacy gate -> create the private GitHub repo -> push~~ **DONE** (`sonugill79/podcast-skill`, private).
+10. **Open:** only after real use, consider making it public. Before that: re-run the privacy gate, decide whether the
+    author attribution and homepage URL should stay, and consider whether `PLAN.md`/`CLAUDE.md` (which name the private
+    source project) should ship at all in a public repo.
+
+**Left for a future session:** install it the way a stranger would (`/plugin marketplace add sonugill79/podcast-skill`
+then `/plugin install podcast@podcast-skill`) in a scratch HOME and make one real episode through the installed
+plugin rather than the working tree; measure kokoro-only footprint; the LOW nit where a *missing voice file* still
+says "no voice engine installed".
 
 ## 6. Privacy gate (must pass before any push, and again before going public)
 
