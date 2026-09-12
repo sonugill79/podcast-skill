@@ -50,6 +50,9 @@ DEFAULTS = {
     "qa_level": "auto",
     "telegram_bot": "",
     "listener_profile": "",
+    # Which cast (casts/<name>.md) an episode uses when the request doesn't name one.
+    # The `debate` angle overrides it with `panel`, which is the cast it is written for.
+    "default_cast": "two-host",
     # always: install whatever's missing (ffmpeg, then voice, then qa) in the
     # background the moment an episode needs it -- no prompt, nothing to ask for.
     # audio-only: same, but skip the qa model (ffmpeg + voice only).
@@ -67,6 +70,7 @@ ENV_OVERRIDES = {
     "PODCAST_QA_LEVEL": "qa_level",
     "PODCAST_TELEGRAM_BOT": "telegram_bot",
     "PODCAST_LISTENER_PROFILE": "listener_profile",
+    "PODCAST_DEFAULT_CAST": "default_cast",
     "PODCAST_AUTO_SETUP": "auto_setup",
 }
 
@@ -926,6 +930,12 @@ def status(cfg=None, det=None):
     }
 
     return {"voice": voice, "qa": qa, "voice_downgraded": downgraded,
+            # The resolved settings themselves. SKILL.md has always told the skill to
+            # read episodes_dir from `status --json`, and until now the key wasn't
+            # there -- only a formatted copy inside delivery.state. Everything a
+            # caller needs to start an episode is here, already resolved through
+            # DEFAULTS -> plugin options -> config file -> environment.
+            "config": {k: cfg.get(k, DEFAULTS.get(k)) for k in DEFAULTS},
             "delivery": delivery, "ffmpeg": ffmpeg_row,
             "auto_setup": auto_setup_info, "warnings": warnings, "ok": not warnings}
 
@@ -1001,6 +1011,7 @@ def run_selftest():
             cfg = load()
             check("defaults: episodes_dir", cfg["episodes_dir"] == os.path.expanduser(DEFAULTS["episodes_dir"]))
             check("defaults: voice_engine", cfg["voice_engine"] == "auto")
+            check("defaults: default_cast", cfg["default_cast"] == "two-host")
             check("defaults: qa_level", cfg["qa_level"] == "auto")
             check("defaults: telegram_bot empty", cfg["telegram_bot"] == "")
             check("config_path() honors PODCAST_CONFIG", config_path() == cfg_path)
@@ -1103,6 +1114,11 @@ def run_selftest():
             os.environ["PODCAST_VOICE_ENGINE"] = "kokoro"
             cfg = load()
             check("env overrides file (voice_engine)", cfg["voice_engine"] == "kokoro")
+            os.environ["PODCAST_DEFAULT_CAST"] = "panel"
+            try:
+                check("env overrides default (default_cast)", load()["default_cast"] == "panel")
+            finally:
+                del os.environ["PODCAST_DEFAULT_CAST"]
             check("env leaves other file keys alone (qa_level)", cfg["qa_level"] == "base")
             os.environ["PODCAST_VOICE_ENGINE"] = ""
             cfg = load()
@@ -1685,6 +1701,15 @@ def run_selftest():
                   and "voice-kokoro" not in st_up["auto_setup"]["missing"])
             check("migration: a healthy machine flags nothing",
                   status(up_cfg, everything_det)["voice_downgraded"] is False)
+
+            # status["config"]: the resolved settings the skill actually reads.
+            st_cfg = status(dict(base_cfg, episodes_dir="/tmp/EP", default_cast="panel"),
+                             everything_det)["config"]
+            check("status exposes episodes_dir (SKILL.md has always read it from here)",
+                  st_cfg["episodes_dir"] == "/tmp/EP")
+            check("status exposes default_cast", st_cfg["default_cast"] == "panel")
+            check("status exposes every setting, not a hand-picked few",
+                  set(st_cfg) == set(DEFAULTS))
 
             plan_satisfied = auto_setup_plan(dict(base_cfg, auto_setup="always"), everything_det)
             check("plan(always, everything already installed): nothing to do",

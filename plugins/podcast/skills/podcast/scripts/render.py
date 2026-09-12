@@ -41,7 +41,7 @@ Neither existing is a silent no-op, same as today.
   --selftest   offline parser/lexicon/estimate/engine-selection checks, prints
                PASS/FAIL per check, exits 0/1
 """
-import argparse, hashlib, json, os, re, sys, time
+import argparse, difflib, glob, hashlib, json, os, re, sys, time
 
 try:
     import config
@@ -88,6 +88,37 @@ ENGINE_DEFAULTS = {
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES_DIR = os.path.join(REPO_ROOT, 'templates')
+CASTS_DIR = os.path.join(REPO_ROOT, 'casts')
+
+# The voices in the kokoro v1.0 pack setup.sh downloads (checksum-pinned, so this
+# list is stable). Used to reject a mistyped voice id up front: without it, a typo
+# surfaces as an exception inside kokoro_onnx after the model has loaded and the
+# episode's research has already been paid for. Prefix is language+gender --
+# a=American, b=British, e=Spanish, f=French, h=Hindi, i=Italian, j=Japanese,
+# p=Portuguese, z=Mandarin; f=female, m=male.
+KOKORO_VOICE_IDS = frozenset("""
+af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river
+af_sarah af_sky am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx
+am_puck am_santa bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george
+bm_lewis ef_dora em_alex em_santa ff_siwis hf_alpha hf_beta hm_omega hm_psi if_sara
+im_nicola jf_alpha jf_gongitsune jf_nezumi jf_tebukuro jm_kumo pf_dora pm_alex
+pm_santa zf_xiaobei zf_xiaoni zf_xiaoxiao zf_xiaoyi zm_yunjian zm_yunxi zm_yunxia
+zm_yunyang
+""".split())
+
+
+def validate_kokoro_voices(voices, source):
+    """Reject a voice id kokoro doesn't have, naming the closest real one.
+
+    Only for the kokoro engines -- piper's voice names are model filenames and are
+    already checked by _make_piper_engine() before any audio is synthesized."""
+    for speaker, voice in sorted(voices.items()):
+        if voice in KOKORO_VOICE_IDS:
+            continue
+        near = difflib.get_close_matches(voice, sorted(KOKORO_VOICE_IDS), n=3, cutoff=0.6)
+        hint = f' -- did you mean {", ".join(near)}?' if near else ''
+        die(f'{source}: {speaker}={voice!r} is not a kokoro voice{hint}\n'
+            f'  (54 available; see casts/README.md)', 2)
 
 CHAPTER_RE = re.compile(r'^#\s*─+\s*(.+?)\s*─*\s*$')
 
@@ -171,6 +202,118 @@ def parse_voices(spec):
             die(f'--voices: malformed entry (expected SPEAKER=voice): {kv!r}', 2)
         voices[k] = v
     return voices
+
+
+CAST_FENCE = 'cast'
+
+
+def parse_cast(text, source='<cast>'):
+    """Parse a cast file's ```cast block into ({SPEAKER: voice}, {SPEAKER: speed}).
+
+    The block is the one machine-readable part of an otherwise prose file -- the
+    rest of a cast describes how each host talks, which only the script writer
+    reads. One line per speaker:
+
+        MODERATOR = bf_emma @ 0.98
+        SKEPTIC   = af_nicole            # speed defaults to 1.0
+
+    Everything else in the file is ignored, so a cast stays a document a person
+    can read. Parsed here rather than transcribed into --voices by the caller so
+    a typo is a real error with a line number instead of a wrong voice nobody
+    notices until the episode is rendered."""
+    lines = text.splitlines()
+    start = end = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if start is None:
+            if stripped.startswith('```') and stripped[3:].strip() == CAST_FENCE:
+                start = i + 1
+        elif stripped.startswith('```'):
+            end = i
+            break
+    if start is None:
+        die(f'{source}: no ```{CAST_FENCE} block -- a cast file must declare its '
+            f'voices (SPEAKER = voice [@ speed], one per line)', 2)
+    if end is None:
+        die(f'{source}:{start}: ```{CAST_FENCE} block is never closed', 2)
+
+    voices, speeds = {}, {}
+    for offset, raw in enumerate(lines[start:end]):
+        n = start + offset + 1  # 1-based, for the error message
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if '=' not in line:
+            die(f'{source}:{n}: expected SPEAKER = voice [@ speed], got: {raw.strip()[:60]!r}', 2)
+        speaker, rest = line.split('=', 1)
+        speaker = speaker.strip()
+        voice, _, speed_text = (x.strip() for x in rest.partition('@'))
+        if not speaker or not voice:
+            die(f'{source}:{n}: expected SPEAKER = voice [@ speed], got: {raw.strip()[:60]!r}', 2)
+        if speaker in voices:
+            die(f'{source}:{n}: {speaker} is listed twice in the cast', 2)
+        speed = 1.0
+        if speed_text:
+            try:
+                speed = float(speed_text)
+            except ValueError:
+                die(f'{source}:{n}: {speed_text!r} is not a number (speed, e.g. @ 1.05)', 2)
+            # A cast is meant to vary pace by a few percent for character. Anything
+            # outside this is a typo (@ 10 for @ 1.0), and kokoro turns it into
+            # unlistenable audio rather than failing, so catch it here.
+            if not 0.5 <= speed <= 2.0:
+                die(f'{source}:{n}: speed {speed} is outside 0.5-2.0', 2)
+        voices[speaker] = voice
+        speeds[speaker] = speed
+    if not voices:
+        die(f'{source}: the ```{CAST_FENCE} block is empty -- no speakers declared', 2)
+    return voices, speeds
+
+
+def parse_speeds(spec):
+    """--speeds SPEAKER=1.05[,SPEAKER=0.98...] -> {SPEAKER: float}."""
+    speeds = {}
+    for kv in spec.split(','):
+        if '=' not in kv:
+            die(f'--speeds: malformed entry (expected SPEAKER=number): {kv!r}', 2)
+        k, v = (x.strip() for x in kv.split('=', 1))
+        if not k or not v:
+            die(f'--speeds: malformed entry (expected SPEAKER=number): {kv!r}', 2)
+        try:
+            speeds[k] = float(v)
+        except ValueError:
+            die(f'--speeds: {v!r} is not a number (e.g. {k}=1.05)', 2)
+        if not 0.5 <= speeds[k] <= 2.0:
+            die(f'--speeds: {k}={speeds[k]} is outside 0.5-2.0', 2)
+    return speeds
+
+
+def resolve_cast(args, engine_id):
+    """(voices, speeds) from --cast / --voices / --speeds / the engine default table.
+
+    Precedence, lowest to highest: the engine's default two-speaker table, then a
+    --cast file, then explicit --voices / --speeds entries (per speaker, so one
+    voice can be swapped without restating the cast). --speed stays the baseline
+    for any speaker a cast doesn't pace."""
+    voices = {}
+    speeds = {}
+    if args.cast:
+        try:
+            with open(args.cast, encoding='utf-8') as f:
+                text = f.read()
+        except OSError as e:
+            die(f'--cast {args.cast}: {e.strerror or e}', 2)
+        voices, speeds = parse_cast(text, args.cast)
+    elif not args.voices:
+        voices = default_voices_for(engine_id or 'kokoro')
+    if args.voices:
+        voices.update(parse_voices(args.voices))
+    if args.speeds:
+        speeds.update(parse_speeds(args.speeds))
+    speeds = {sp: speeds.get(sp, args.speed) for sp in voices}
+    if (engine_id or '').startswith('kokoro'):
+        validate_kokoro_voices(voices, args.cast or '--voices')
+    return voices, speeds
 
 
 def default_voices_for(engine_id):
@@ -362,6 +505,50 @@ def cleanup_orphan_tmp_files(cache_dir, now=None, is_alive=pid_alive):
                 pass
 
 
+def title_from_out(out_path):
+    """"tidal-energy-explained.mp3" -> "Tidal Energy Explained" -- a real title in a
+    podcast app is better than the filename, and better than nothing."""
+    stem = os.path.splitext(os.path.basename(out_path))[0]
+    words = [w for w in re.split(r'[-_\s]+', stem) if w]
+    return ' '.join(w if w.isupper() else w.capitalize() for w in words) or stem
+
+
+def _ffmetadata_escape(value):
+    """ffmetadata is line-based: =, ;, #, \\ and newlines must be escaped or the
+    file silently reparses into the wrong fields."""
+    out = []
+    for ch in str(value):
+        if ch in '=;#\\':
+            out.append('\\' + ch)
+        elif ch == '\n':
+            out.append('\\\n')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def build_ffmetadata(tags, chapter_records, duration):
+    """An ffmpeg FFMETADATA1 document: global tags plus one [CHAPTER] per record.
+
+    Chapter ends are the next chapter's start (the last one runs to `duration`),
+    in milliseconds -- players show a chapter list built from these, which is what
+    turns a long file into something you can skip around in."""
+    lines = [';FFMETADATA1']
+    for k, v in tags.items():
+        if v:
+            lines.append(f'{k}={_ffmetadata_escape(v)}')
+    for i, ch in enumerate(chapter_records):
+        start = max(0.0, float(ch['start']))
+        end = float(chapter_records[i + 1]['start']) if i + 1 < len(chapter_records) else float(duration)
+        # A zero- or negative-length chapter makes ffmpeg drop the whole chapter
+        # list; keep every entry at least a millisecond long and ordered.
+        end = max(end, start + 0.001)
+        lines += ['[CHAPTER]', 'TIMEBASE=1/1000',
+                  f'START={int(round(start * 1000))}', f'END={int(round(end * 1000))}',
+                  f'title={_ffmetadata_escape(ch["title"])}']
+    return '\n'.join(lines) + '\n'
+
+
 def fmt_mmss(seconds):
     seconds = max(0.0, seconds)
     return f'{int(seconds // 60)}:{int(seconds % 60):02d}'
@@ -379,7 +566,25 @@ def build_arg_parser():
                      help="SPEAKER=voice[,SPEAKER=voice...]; if omitted, uses the "
                           "selected engine's own default two-speaker table "
                           "(MAYA=female, ALEX=male)")
-    ap.add_argument('--speed', type=float, default=1.0)
+    ap.add_argument('--cast', default=None,
+                     help='cast file (see casts/); its ```cast block binds each '
+                          'SPEAKER to a voice and an optional pace')
+    ap.add_argument('--speeds', default=None,
+                     help='SPEAKER=1.05[,SPEAKER=0.98...] -- per-speaker pace, '
+                          'overriding a --cast entry or --speed for those speakers')
+    ap.add_argument('--speed', type=float, default=1.0,
+                     help='baseline pace for every speaker a cast or --speeds '
+                          'does not set (default 1.0)')
+    # Episode metadata. Without these an episode arrives in a podcast app as an
+    # untitled blob; chapters are always embedded (see write_ffmetadata).
+    ap.add_argument('--title', default=None,
+                     help='episode title (default: derived from the output filename)')
+    ap.add_argument('--album', default=None, help='show name (default: "Podcast")')
+    ap.add_argument('--artist', default=None,
+                     help='hosts (default: the cast\'s speakers, in script order)')
+    ap.add_argument('--date', default=None, help='YYYY-MM-DD (default: today)')
+    ap.add_argument('--cover', default=None,
+                     help='cover image (jpg/png) to embed as episode artwork')
     ap.add_argument('--cache', default=None)
     ap.add_argument('--lexicon', default=None,
                      help='pronunciation rules file; default is <directory of SCRIPT>/'
@@ -735,6 +940,163 @@ def run_selftest():
               default_voices_for('piper') != default_voices_for('kokoro'))
         check('unknown engine id falls back to kokoro defaults',
               default_voices_for('nonexistent-engine') == default_voices_for('kokoro'))
+
+        # ---------------------------------------------------------------- casts
+        def cast_text(body):
+            return '# Cast: test\n\nprose a reader sees\n\n## Voices\n\n```cast\n' + body + '```\n\nmore prose\n'
+
+        cv, cs = parse_cast(cast_text('MODERATOR = bf_emma @ 0.98\nSKEPTIC = af_nicole\n'))
+        check('cast: speakers and voices parsed',
+              cv == {'MODERATOR': 'bf_emma', 'SKEPTIC': 'af_nicole'})
+        check('cast: an @ speed is read', cs['MODERATOR'] == 0.98)
+        check('cast: a speaker with no @ defaults to 1.0', cs['SKEPTIC'] == 1.0)
+
+        cv3, _ = parse_cast(cast_text('A = af_heart\nB = am_michael\nC = bm_george\n'))
+        check('cast: three speakers is not a special case', len(cv3) == 3)
+
+        cv_c, cs_c = parse_cast(cast_text(
+            '# a comment line\n\nHOST = af_bella @ 1.02  # trailing comment\n'))
+        check('cast: comments and blank lines are ignored',
+              cv_c == {'HOST': 'af_bella'} and cs_c['HOST'] == 1.02)
+
+        def cast_dies(body, label, whole=None):
+            try:
+                parse_cast(whole if whole is not None else cast_text(body))
+            except SystemExit as e:
+                check(label, e.code == 2)
+            else:
+                check(label, False)
+
+        cast_dies(None, 'cast: a file with no ```cast block exits 2',
+                  whole='# Cast: nope\n\njust prose, no block\n')
+        cast_dies(None, 'cast: an unclosed ```cast block exits 2',
+                  whole='```cast\nHOST = af_heart\n')
+        cast_dies('', 'cast: an empty block exits 2')
+        cast_dies('HOST af_heart\n', 'cast: a line with no = exits 2')
+        cast_dies('HOST = \n', 'cast: a speaker with no voice exits 2')
+        cast_dies('HOST = af_heart\nHOST = am_adam\n', 'cast: a duplicate speaker exits 2')
+        cast_dies('HOST = af_heart @ fast\n', 'cast: a non-numeric speed exits 2')
+        cast_dies('HOST = af_heart @ 10\n', 'cast: @ 10 (a typo for 1.0) exits 2')
+        cast_dies('HOST = af_heart @ 0.1\n', 'cast: an absurdly slow speed exits 2')
+
+        # parse_speeds()
+        check('--speeds parses', parse_speeds('A=1.05,B=0.98') == {'A': 1.05, 'B': 0.98})
+        for bad, label in (('A', 'no ='), ('A=x', 'not a number'), ('A=9', 'out of range')):
+            try:
+                parse_speeds(bad)
+            except SystemExit as e:
+                check(f'--speeds rejects {label}', e.code == 2)
+            else:
+                check(f'--speeds rejects {label}', False)
+
+        # resolve_cast(): precedence and the pace fallback.
+        class FakeArgs:
+            def __init__(self, **kw):
+                self.cast = self.voices = self.speeds = None
+                self.speed = 1.0
+                self.__dict__.update(kw)
+
+        v_def, s_def = resolve_cast(FakeArgs(), 'kokoro')
+        check('resolve_cast: no flags -> the engine default table',
+              v_def == default_voices_for('kokoro'))
+        check('resolve_cast: default table is paced at --speed',
+              set(s_def.values()) == {1.0})
+        check('resolve_cast: --speed becomes the baseline for every speaker',
+              set(resolve_cast(FakeArgs(speed=1.1), 'kokoro')[1].values()) == {1.1})
+
+        v_ov, _ = resolve_cast(FakeArgs(voices='MAYA=af_sky'), 'kokoro')
+        check('resolve_cast: --voices alone still works (no cast)', v_ov['MAYA'] == 'af_sky')
+
+        with tempfile.TemporaryDirectory() as td:
+            cast_path = os.path.join(td, 'panel.md')
+            with open(cast_path, 'w', encoding='utf-8') as f:
+                f.write(cast_text('MODERATOR = bf_emma @ 0.98\nADVOCATE = am_michael @ 1.04\n'))
+            v_c, s_c = resolve_cast(FakeArgs(cast=cast_path), 'kokoro')
+            check('resolve_cast: --cast replaces the default table, it does not merge',
+                  set(v_c) == {'MODERATOR', 'ADVOCATE'})
+            check('resolve_cast: --cast carries its paces', s_c['ADVOCATE'] == 1.04)
+
+            v_m, s_m = resolve_cast(
+                FakeArgs(cast=cast_path, voices='ADVOCATE=am_adam', speeds='MODERATOR=1.0'), 'kokoro')
+            check('resolve_cast: --voices overrides one cast voice, keeps the rest',
+                  v_m == {'MODERATOR': 'bf_emma', 'ADVOCATE': 'am_adam'})
+            check('resolve_cast: --speeds overrides one cast pace, keeps the rest',
+                  s_m['MODERATOR'] == 1.0 and s_m['ADVOCATE'] == 1.04)
+
+            try:
+                resolve_cast(FakeArgs(cast=os.path.join(td, 'missing.md')), 'kokoro')
+            except SystemExit as e:
+                check('resolve_cast: a missing --cast file exits 2', e.code == 2)
+            else:
+                check('resolve_cast: a missing --cast file exits 2', False)
+
+        # Per-speaker pace must reach the cache key, or two speakers at different
+        # paces would serve each other's audio for the same line.
+        check('cache key separates two paces of one voice+line',
+              cache_key('kokoro', 'af_heart', 24000, 1.0, 'same words')
+              != cache_key('kokoro', 'af_heart', 24000, 1.05, 'same words'))
+
+        # ------------------------------------------------- metadata + chapters
+        check('title from a slug', title_from_out('/x/learning-to-sail.mp3') == 'Learning To Sail')
+        check('title keeps an acronym', title_from_out('/x/NATO-explained.mp3') == 'NATO Explained')
+
+        meta = build_ffmetadata({'title': 'T', 'artist': 'A', 'album': None},
+                                [{'title': 'One', 'start': 0.0}, {'title': 'Two', 'start': 12.5}], 30.0)
+        check('ffmetadata starts with the magic line', meta.startswith(';FFMETADATA1\n'))
+        check('ffmetadata writes set tags', 'title=T' in meta and 'artist=A' in meta)
+        check('ffmetadata omits empty tags', 'album=' not in meta)
+        check('ffmetadata writes one [CHAPTER] per record', meta.count('[CHAPTER]') == 2)
+        check('ffmetadata chapter 1 spans to chapter 2',
+              'START=0' in meta and 'END=12500' in meta)
+        check('ffmetadata last chapter ends at the duration', 'END=30000' in meta)
+        check('ffmetadata chapter titles are written', 'title=One' in meta and 'title=Two' in meta)
+
+        # A chapter list with a zero-length entry is dropped wholesale by ffmpeg.
+        meta_dup = build_ffmetadata({}, [{'title': 'A', 'start': 5.0}, {'title': 'B', 'start': 5.0}], 5.0)
+        starts_ends = [l for l in meta_dup.splitlines() if l.startswith(('START=', 'END='))]
+        check('ffmetadata never emits a zero-length chapter',
+              all(int(e.split('=')[1]) > int(s.split('=')[1])
+                  for s, e in zip(starts_ends[::2], starts_ends[1::2])))
+        check('ffmetadata escapes the characters that would reparse',
+              '\\=' in build_ffmetadata({'title': 'a=b'}, [], 1.0))
+        check('ffmetadata with no chapters is still valid',
+              build_ffmetadata({'title': 'T'}, [], 1.0).strip().endswith('title=T'))
+
+        # Every cast this skill ships must parse, and its voices must be ones the
+        # default engine actually has. A typo here reaches every user and surfaces
+        # only mid-render, after the research has been paid for.
+        shipped = sorted(glob.glob(os.path.join(CASTS_DIR, '*.md'))) if os.path.isdir(CASTS_DIR) else []
+        cast_files = [f for f in shipped
+                      if open(f, encoding='utf-8').read().lstrip().startswith('# Cast:')]
+        check('casts/ ships at least the three documented casts', len(cast_files) >= 3)
+        check('casts/ has a README that is not itself parsed as a cast',
+              os.path.exists(os.path.join(CASTS_DIR, 'README.md'))
+              and len(cast_files) == len(shipped) - 1)
+        for path in cast_files:
+            name = os.path.basename(path)
+            try:
+                cvoices, cspeeds = parse_cast(open(path, encoding='utf-8').read(), path)
+            except SystemExit:
+                check(f'shipped cast parses: {name}', False)
+                continue
+            check(f'shipped cast parses: {name}', bool(cvoices))
+            check(f'shipped cast {name}: every voice is in the kokoro pack',
+                  all(v in KOKORO_VOICE_IDS for v in cvoices.values()))
+            check(f'shipped cast {name}: paces stay in the believable band',
+                  all(0.9 <= sp <= 1.15 for sp in cspeeds.values()))
+            check(f'shipped cast {name}: no two speakers share a voice',
+                  len(set(cvoices.values())) == len(cvoices))
+        panel = os.path.join(CASTS_DIR, 'panel.md')
+        if os.path.exists(panel):
+            pv, _ = parse_cast(open(panel, encoding='utf-8').read(), panel)
+            check('panel is the three-voice cast the debate angle expects',
+                  set(pv) == {'HOST', 'ADVOCATE', 'SKEPTIC'})
+            # Two same-accent, same-gender voices in one episode is the classic
+            # mistake -- a listener cannot tell who is talking.
+            check('panel voices differ in accent or gender',
+                  len({v[:2] for v in pv.values()}) >= 2)
+        check('the debate angle ships alongside the panel cast',
+              os.path.exists(os.path.join(REPO_ROOT, 'angles', 'debate.md')))
 
         # select_engine(): precedence is --engine > config voice_engine > config
         # detect() > exit 3. A fake config object is injected via `which_config` so
@@ -1222,7 +1584,9 @@ def main():
         # No real engine is resolved for a dry run: every engine's default table
         # uses the same speaker keys (MAYA/ALEX), so parsing the script for its
         # word/duration estimate never needs to know which engine would render it.
-        voices = parse_voices(args.voices) if args.voices else default_voices_for('kokoro')
+        # No real engine is resolved for a dry run, so the cast is resolved against
+        # kokoro's table -- only the speaker KEYS matter for parsing the script.
+        voices, speeds = resolve_cast(args, 'kokoro')
         engine_id = None
     else:
         if not args.out:
@@ -1237,7 +1601,7 @@ def main():
             die(f'{args.out}: output must not end in .wav (it collides with this '
                 f'render\'s own intermediate file) -- use .mp3', 2)
         engine_id = select_engine(args.engine)
-        voices = parse_voices(args.voices) if args.voices else default_voices_for(engine_id)
+        voices, speeds = resolve_cast(args, engine_id)
 
     lexicon_explicit = args.lexicon is not None
     lexicon_path = args.lexicon if lexicon_explicit else default_lexicon_path(args.script)
@@ -1311,7 +1675,8 @@ def main():
 
     def say(speaker, spoken_text):
         voice = voices[speaker]
-        key = cache_key(engine.name, voice, sr, args.speed, spoken_text)
+        speed = speeds.get(speaker, args.speed)
+        key = cache_key(engine.name, voice, sr, speed, spoken_text)
         path = os.path.join(cache, f'{key}.wav')
         if os.path.exists(path):
             cached = read_cached(path)
@@ -1321,7 +1686,7 @@ def main():
                 os.remove(path)
             except OSError:
                 pass
-        audio, engine_sr = engine.synth(spoken_text, voice, args.speed)
+        audio, engine_sr = engine.synth(spoken_text, voice, speed)
         if engine_sr != sr:
             die(f'{engine.name}: synth() returned {engine_sr} Hz, expected {sr} Hz', 2)
         audio = trim(np.asarray(audio, dtype=np.float32)) if len(audio) else np.zeros(0, dtype=np.float32)
@@ -1357,9 +1722,37 @@ def main():
     audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
     wav = os.path.splitext(args.out)[0] + '.wav'
     sf.write(wav, audio, sr)
+    duration = len(audio) / sr
+
+    # Tags + chapters go INTO the mp3. Without them a podcast app shows an untitled
+    # file with no way to skip between segments, however good the audio is.
+    tags = {
+        'title': args.title or title_from_out(args.out),
+        'album': args.album or 'Podcast',
+        'artist': args.artist or ', '.join(dict.fromkeys(
+            ev[1] for ev in events if ev[0] == 'say')).title(),
+        'date': args.date or time.strftime('%Y-%m-%d'),
+        'genre': 'Podcast',
+        'comment': f'Generated locally with the podcast skill ({engine.name}).',
+    }
+    meta_path = os.path.splitext(args.out)[0] + '.ffmetadata'
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        f.write(build_ffmetadata(tags, chapter_records, duration))
+
+    cmd = [ffmpeg_path, '-y', '-loglevel', 'error', '-i', wav, '-i', meta_path]
+    if args.cover:
+        if not os.path.exists(args.cover):
+            die(f'--cover {args.cover}: no such file', 2)
+        cmd += ['-i', args.cover]
+    cmd += ['-map_metadata', '1', '-map', '0:a']
+    if args.cover:
+        # An attached picture is a video stream to ffmpeg; copy it through and mark
+        # it as front cover art so players show it instead of trying to play it.
+        cmd += ['-map', '2:v', '-c:v', 'copy', '-disposition:v:0', 'attached_pic']
+    cmd += ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ac', '1', '-b:a', '96k',
+            '-id3v2_version', '3', '-write_id3v1', '1', args.out]
     try:
-        subprocess.run([ffmpeg_path, '-y', '-loglevel', 'error', '-i', wav, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
-                        '-ac', '1', '-b:a', '96k', args.out], check=True)
+        subprocess.run(cmd, check=True)
     except FileNotFoundError:
         # Distinct from "no voice engine installed" and "audio runtime incomplete"
         # -- the engine and its Python runtime can both be fine while ffmpeg (a
@@ -1368,7 +1761,7 @@ def main():
         # someone back down the voice-engine troubleshooting path.
         die('ffmpeg not found — run: /podcast upgrade audio', 3)
     os.remove(wav)
-    duration = len(audio) / sr
+    os.remove(meta_path)
 
     chapters_path = os.path.splitext(args.out)[0] + '.chapters.json'
     with open(chapters_path, 'w', encoding='utf-8') as f:
@@ -1376,7 +1769,11 @@ def main():
     print()
     for c in chapter_records:
         print(f'{fmt_mmss(c["start"])}  {c["title"]}')
-    print(f'✓ {args.out}  {duration / 60:.1f} min, {said} lines  ({engine.name}, {sr} Hz)')
+    paced = {sp: sd for sp, sd in speeds.items() if abs(sd - 1.0) > 1e-9}
+    cast_note = f', cast {os.path.basename(args.cast)}' if args.cast else ''
+    pace_note = ('  pace: ' + ', '.join(f'{sp} {sd:g}x' for sp, sd in sorted(paced.items()))) if paced else ''
+    print(f'✓ {args.out}  {duration / 60:.1f} min, {said} lines, '
+          f'{len(chapter_records)} chapters  ({engine.name}, {sr} Hz{cast_note}){pace_note}')
 
 
 if __name__ == '__main__':

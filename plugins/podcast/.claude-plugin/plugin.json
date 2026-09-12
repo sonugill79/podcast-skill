@@ -1,7 +1,7 @@
 {
   "name": "podcast",
-  "description": "Research any topic and turn it into a verified, two-host, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
-  "version": "0.1.3",
+  "description": "Research any topic and turn it into a verified, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Pick a cast (two hosts, a solo narrator, or a three-voice panel that argues a question from both sides) and get a tagged, chaptered episode. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
+  "version": "0.2.0",
   "author": {
     "name": "Sonu Gill"
   },
@@ -26,6 +26,12 @@
       "type": "string",
       "description": "auto (default) \u2014 use the best installed engine, and install kokoro (\u2248521 MB on disk, best quality) the first time an episode needs audio. none \u2014 script only, nothing downloads. piper \u2014 \u2248375 MB, faster, noticeably thinner voices. kokoro \u2014 pin the best engine explicitly. Change later with: /podcast upgrade voice",
       "default": "auto"
+    },
+    "default_cast": {
+      "title": "Default cast",
+      "type": "string",
+      "description": "Who hosts an episode when the request doesn't say: two-host (a host and a co-host), panel (moderator, advocate and skeptic \u2014 used automatically for debates) or solo (one narrator). Any name in casts/ works. Change later with: /podcast --cast <name>",
+      "default": "two-host"
     },
     "qa_level": {
       "title": "Audio QA level",

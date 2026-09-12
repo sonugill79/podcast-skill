@@ -6,7 +6,8 @@ description: Research any topic and turn it into a verified, two-host, podcast-s
 # Podcast: topic → verified research → two-host script → audio
 
 `SCRIPTS` below means the `scripts/` directory next to this file. When running inside a plugin that is
-`${CLAUDE_PLUGIN_ROOT}/skills/podcast/scripts`. Angle playbooks are in `angles/`, starter files in `templates/`.
+`${CLAUDE_PLUGIN_ROOT}/skills/podcast/scripts`. Angle playbooks are in `angles/`, casts in `casts/`, starter files
+in `templates/`. An **angle** decides what the episode covers; a **cast** decides who covers it.
 
 Always call the scripts with plain `python3` / `bash` as written here. They find their own runtime: anything needing
 installed packages re-executes itself inside the managed environment. If a script exits **3**, nothing is installed for
@@ -64,10 +65,16 @@ After any install, **continue where you left off** — if a script exists, rende
 
 ## Invocation
 
-`/podcast <topic> [--angle interview-prep|learn-topic|company-diligence|product-research] [--minutes N] [--depth quick|standard|deep] [--personal] [--no-deliver]`
+`/podcast <topic> [--angle interview-prep|learn-topic|company-diligence|product-research|debate] [--cast two-host|panel|solo] [--minutes N] [--depth quick|standard|deep] [--personal] [--no-deliver]`
 
 - **Angle:** infer it ("interviewing at X" → interview-prep, "should we use X" → product-research, "X as an
-  investment" → company-diligence, otherwise learn-topic). Ask only if genuinely ambiguous.
+  investment" → company-diligence, a yes/no or either-or question with real disagreement behind it → debate,
+  otherwise learn-topic). Ask only if genuinely ambiguous.
+- **Cast:** read `casts/README.md`, then pick one and hold it for the whole episode. The default comes from
+  `config.py status --json` → `config.default_cast` (`two-host` unless the user changed it);
+  `debate` requires `panel`; `solo` when the listener wants a briefing rather than a conversation. **One cast per
+  episode, start to finish** — a listener is still learning the voices, and swapping mid-episode loses them.
+  Across episodes, including inside a series, the cast is free to change.
 - **Depth:** quick = 3 research agents, ~8 verified claims, ~10 min. standard (default) = 5 agents, ~20 claims,
   ~20 min. deep = standard plus an adversarial reviewer, ~25 min.
 - **`--personal`:** only with this flag may you read the user's mail or calendar, only for this episode, and record
@@ -77,14 +84,16 @@ After any install, **continue where you left off** — if a script exists, rende
 one episode. Never batch topics or schedule episodes without being asked.
 
 ## 1. Brief
-Episodes live in the configured folder (`python3 SCRIPTS/config.py status --json` → `episodes_dir`), one directory per
+Episodes live in the configured folder (`python3 SCRIPTS/config.py status --json` → `config.episodes_dir`), one directory per
 episode named `<topic-slug>-<yyyy-mm>`. Write `brief.md`: topic, angle, depth, minutes, date, the listener's goal, and
 whether any personal sources were used. If a listener profile is configured, read it and write for that person by
 name; otherwise write for a general audience.
 
 ## 2. Research
 Read `angles/<angle>.md` for the research areas, then launch **all agents in one message** (model: sonnet), one per
-area, each writing `research/0N-<area>.md`. Require of every agent: a source URL and a tag (`[primary]`,
+area, each writing `research/0N-<area>.md`. For `debate`, the two side-agents are launched **blind to each other**:
+each is told to build its own side as strongly as it honestly can, and they are merged only at the script stage. An
+agent asked to argue both sides converges into mush. Require of every agent: a source URL and a tag (`[primary]`,
 `[secondary]`, `[snippet]`) on each claim, a "conflicts and couldn't verify" section, no logins or paywall
 circumvention, and a date on every figure.
 
@@ -101,9 +110,15 @@ Write `sources.md` with: **Verified** (claim + source), **Reported, not re-verif
 re-check before a deadline.
 
 ## 4. Script
-`script.txt`: `MAYA:` / `ALEX:` lines, `---` for a segment break, `[pause N]` for silence, `#` comments, and chapter
-headers like `# ── 3. The bit about money ─────` which become chapter markers.
+`script.txt`: speaker lines, `---` for a segment break, `[pause N]` for silence, `#` comments, and chapter headers
+like `# ── 3. The bit about money ─────` which become chapter markers **inside the MP3**.
+- **Speaker labels are the chosen cast's, exactly** — `MAYA:`/`ALEX:` for two-host, `HOST:`/`ADVOCATE:`/`SKEPTIC:`
+  for panel, `NARRATOR:` for solo. A label the cast doesn't declare fails the render with its line number.
+- Read the cast file and write each speaker as the person it describes — vocabulary, sentence length, what they
+  push on, who concedes. The voices differ, but the writing is what a listener hears as personality.
 - Follow the angle's segment outline. Budget **minutes × 153 words**.
+- **Chapter headers earn their keep now that players show them.** One per segment, named for what is in it
+  ("What the filings actually say"), not "Segment 3".
 - Write for the ear: short sentences, one idea per line, numbers spelled out ("four hundred ninety-five million"),
   "quote" before verbatim text with attribution, hosts who clarify and disagree.
 - Say plainly what could not be verified. Label allegations and anonymous claims as such.
@@ -112,7 +127,11 @@ headers like `# ── 3. The bit about money ─────` which become chap
 - Check the length before rendering: `python3 SCRIPTS/render.py <script> --dry-run`.
 
 ## 5. Render
-`python3 SCRIPTS/render.py <script> <out.mp3>` — for a full episode run it in the background **only in an interactive
+`python3 SCRIPTS/render.py <script> <out.mp3> --cast casts/<cast>.md --title "<episode title>" --album "<show>"`
+— pass the same cast the script was written for. Title, artist, date, genre and the chapter marks are written into
+the MP3, so it arrives in a podcast app as an episode rather than an untitled blob; `--cover <image>` embeds
+artwork. Per-speaker pace comes from the cast file, `--speeds SPEAKER=1.05` overrides one, `--speed` sets the
+baseline. For a full episode run it in the background **only in an interactive
 session**. In a non-interactive run (`claude -p`) the session can end before a backgrounded render finishes, leaving no
 audio; render in the foreground there. Exit **3** means no voice
 engine is installed: tell the user the script is ready and offer `upgrade voice`. Rendering is cached per line, so
