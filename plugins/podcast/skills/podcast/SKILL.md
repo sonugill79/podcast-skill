@@ -12,28 +12,46 @@ Always call the scripts with plain `python3` / `bash` as written here. They find
 installed packages re-executes itself inside the managed environment. If a script exits **3**, nothing is installed for
 that step — relay its one-line message to the user as an offer, and carry on with the rest of the episode.
 
-## Step 0 — always start here
+## Step 0 — fix what's missing yourself, in the background
 
-Run `bash SCRIPTS/setup.sh status` and **show the user its output**, then say in one line what will happen this run
-and what they could upgrade. Never make them ask. For example:
+Run `bash SCRIPTS/setup.sh status`.
 
-> Voice: not installed, so I'll write the script but not the audio. Say **upgrade voice** for a real episode
-> (≈375 MB, well under a minute on a decent connection).
+**Everything present** — one line saying so, then start the episode.
 
-Then continue with the episode. **Never block on an upgrade**; a script-only episode is a real deliverable.
+**Something missing** — the user asked for an episode, not a shopping list. Unless `auto_setup` is `never`:
 
-Handle these phrases whenever they appear, before or during an episode:
+1. Launch `bash SCRIPTS/setup.sh autosetup` **in the background, immediately**. It installs what's missing in
+   priority order (ffmpeg, then the voice engine, then the QA model) with no sudo and nothing outside the plugin's
+   own folder.
+2. **Tell them once, in one line, what is being fetched and how big.** Read that line from the top of
+   `<state>/autosetup.log` — **never pipe `autosetup` into `head` or anything else**, because a closed pipe kills the
+   install (a real defect found in review, 2026-09-12). Do not ask permission; do say what is happening, and mention
+   that `auto_setup=never` turns it off.
+3. **Start the research in the same breath.** The download and the research run together; downloads finish in under a
+   minute, research takes minutes, so the audio is normally ready before the script is.
+
+**Before rendering**, read `<state>/autosetup-result.json`. It reports each component separately, so render as soon
+as ffmpeg and the voice are done — never wait on the audio checker, which is much larger and only needed afterwards.
+`state: running` with those two still pending → wait, and say so. A component failed → use what succeeded and state
+plainly what didn't. All failed → deliver the script, quote the one-line reason, and if it needs something only they
+can do (an unsupported platform), give the exact command.
+
+Never block the episode on a download, never re-run research because a download was slow, and never install anything
+when `auto_setup` is `never`.
+
+These phrases still work if someone wants to drive it manually:
 
 | The user says | Do this |
 |---|---|
-| `upgrade voice` | `bash SCRIPTS/setup.sh install voice-piper` (≈375 MB) or `voice-kokoro` (better voices, larger) — offer the choice; the installer prints exact sizes |
-| `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (≈575 MB); `qa-small` and `qa-medium` are more accurate and larger |
-| `configure telegram` | Explain that it needs `~/.config/telegram-send/bots.json`, then set `telegram_bot` with `python3 SCRIPTS/config.py set telegram_bot=<name>` |
+| `upgrade audio` | `bash SCRIPTS/setup.sh install audio` — ffmpeg plus the smaller voice engine |
+| `upgrade voice` | `bash SCRIPTS/setup.sh install voice-piper` (~375 MB) or `voice-kokoro` (better voices, larger) |
+| `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (~575 MB); `qa-small` and `qa-medium` are larger and more accurate |
+| `stop installing things` | `python3 SCRIPTS/config.py set auto_setup=never` |
+| `configure telegram` | Needs `~/.config/telegram-send/bots.json`; then `python3 SCRIPTS/config.py set telegram_bot=<name>` |
 | `status`, "what do I have" | `bash SCRIPTS/setup.sh status` |
 | something is broken | `bash SCRIPTS/setup.sh doctor` |
 
-After any upgrade, **continue from where you were** — if a script already exists, render it; don't redo research.
-Setup exit code 3 means the user must install a system package themselves; relay the exact command it printed.
+After any install, **continue where you left off** — if a script exists, render it; never redo research.
 
 ## Invocation
 

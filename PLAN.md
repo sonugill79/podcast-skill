@@ -244,6 +244,31 @@ kept serving the cached copy — Claude Code compares manifest versions, not com
 made the update land, and the installed copy then honoured the install-time answers (episodes dir and voice engine).
 **Every user-visible change needs a version bump in both manifests**; this is now in `CLAUDE.md`.
 
+## 7i. Auto-setup (owner request, 2026-09-12) — v0.1.2
+
+Driven by a real desktop install: the banner said "ffmpeg: missing → sudo apt install ffmpeg" and stopped there. The
+owner's point: we knew audio was wanted and knew what was missing, so install it. And **don't make the user say a
+magic phrase** — no prompt, no `upgrade audio` required.
+
+Design now being built:
+- **`setup.sh install ffmpeg-static`** — static ffmpeg + ffprobe into `<state>/bin`, checksum-verified, no sudo. macOS
+  prefers `brew install ffmpeg` (also sudo-free) and falls back to a static build. Unsupported platform or no network
+  → exit 3 with the manual command, i.e. today's behaviour.
+- **`setup.sh autosetup [--only audio] [--json]`** — works out what's missing and installs it in priority order
+  (ffmpeg → voice → QA model), background-safe, partial failure tolerated, writes a machine-readable result the skill
+  reads before rendering, and prints what it will download and the total size as its first line.
+- **`auto_setup` setting**: `always` (default) | `audio-only` | `never`, exposed in `plugin.json` userConfig.
+- **`detect()`** prefers `<state>/bin` over `PATH` and exposes absolute ffmpeg/ffprobe paths; `render.py`/`qa.py` use
+  them and exit 3 with `ffmpeg not found — run: /podcast upgrade audio` when neither exists (done: selftests 110/129).
+- **SKILL.md step 0** rewritten: launch `autosetup` in the background, announce (don't ask) what is downloading and how
+  big, start research in the same breath, check the result before rendering. Never blocks the episode.
+
+Principles held: announce but never ask; never sudo; nothing outside the plugin's folder; sizes always stated;
+`auto_setup=never` fully respected; a failed download still yields a script-only episode.
+
+**Next after it lands:** review one tier up, a clean-HOME run with ffmpeg genuinely absent, version bump to 0.1.2
+(updates only reach installed users on a version change), then the owner re-tests on the desktop that hit this.
+
 ## 8. Known risks
 
 - ~~espeak-ng needed~~ — **disproved**: both engines bundle phonemization. `detect()` still reports it, informational only.

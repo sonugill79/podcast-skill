@@ -1,7 +1,7 @@
 {
   "name": "podcast",
   "description": "Research any topic and turn it into a verified, two-host, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": {
     "name": "Sonu Gill"
   },
@@ -46,6 +46,12 @@
       "description": "Path to a markdown file describing who is listening, so episodes speak to you directly. Leave blank for a neutral audience.",
       "default": "",
       "required": false
+    },
+    "auto_setup": {
+      "title": "Install missing pieces automatically",
+      "type": "string",
+      "description": "always (default) \u2014 when an episode needs ffmpeg, a voice or the audio checker and they are missing, install them in the background while the research runs, no sudo and nothing outside the plugin's folder. audio-only \u2014 skip the audio checker. never \u2014 install nothing unless asked.",
+      "default": "always"
     }
   }
 }
