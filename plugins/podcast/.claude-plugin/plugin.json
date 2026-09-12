@@ -1,7 +1,7 @@
 {
   "name": "podcast",
   "description": "Research any topic and turn it into a verified, two-host, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "Sonu Gill"
   },
