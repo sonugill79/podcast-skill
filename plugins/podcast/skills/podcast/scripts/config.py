@@ -726,11 +726,31 @@ def auto_setup_plan(cfg=None, det=None, only=None):
         add("ffmpeg-static", "ffmpeg", "ffmpeg", FFMPEG_DISK_BYTES, FFMPEG_DOWNLOAD_BYTES)
 
     voice_engine = cfg.get("voice_engine", "auto")
-    if det.get("voice_active") is None and voice_engine != "none":
-        target = voice_engine if voice_engine in VOICE_LEVELS[1:] else "piper"
+    if voice_is_downgraded(cfg, det):
+        # An upgrade, not a gap: piper already renders, so this never blocks an
+        # episode. It downloads alongside the research, and because `auto` resolves
+        # to the best INSTALLED engine at render time, the very next render picks
+        # kokoro up if it finished -- and quietly stays on piper if it didn't.
+        result["components"].append({
+            "component": "voice-kokoro", "kind": "voice", "target": "kokoro",
+            "upgrade_from": "piper",
+            "bytes": VOICE_DISK_BYTES["kokoro"], "download_bytes": VOICE_DOWNLOAD_BYTES["kokoro"],
+        })
+        result["total_bytes"] += VOICE_DISK_BYTES["kokoro"]
+        result["total_download_bytes"] += VOICE_DOWNLOAD_BYTES["kokoro"]
+    elif det.get("voice_active") is None and voice_engine != "none":
+        # Under "auto" we install the BEST engine, not the smallest. Found on a real
+        # machine, 2026-09-12: a fresh install auto-installed piper, voice_engine=auto
+        # then resolved to it as "best installed" forever, and the owner heard the
+        # drop (22.05 kHz en_US-amy-medium vs kokoro's 24 kHz af_heart) across two
+        # episodes without anything in the banner hinting a better engine existed.
+        # The difference is ~160 MB on a download the user is already waiting through;
+        # a wrong-sounding episode is the more expensive mistake. `piper` stays a
+        # first-class explicit choice for anyone who wants small and fast.
+        target = voice_engine if voice_engine in VOICE_LEVELS[1:] else "kokoro"
         add(f"voice-{target}", "voice", target,
-            VOICE_DISK_BYTES.get(target, VOICE_DISK_BYTES["piper"]),
-            VOICE_DOWNLOAD_BYTES.get(target, VOICE_DOWNLOAD_BYTES["piper"]))
+            VOICE_DISK_BYTES.get(target, VOICE_DISK_BYTES["kokoro"]),
+            VOICE_DOWNLOAD_BYTES.get(target, VOICE_DOWNLOAD_BYTES["kokoro"]))
 
     if effective_mode == "always":
         qa_level = cfg.get("qa_level", "auto")
@@ -746,6 +766,22 @@ def auto_setup_plan(cfg=None, det=None, only=None):
 # ---------------------------------------------------------------------------
 # Status: machine-readable + human banner
 # ---------------------------------------------------------------------------
+
+def voice_is_downgraded(cfg, det):
+    """True when this machine is rendering with piper while kokoro -- the engine
+    `auto` is supposed to give people -- is not installed.
+
+    Only ever true under voice_engine=auto: someone who typed `piper` chose small
+    and fast and is not second-guessed. This exists because 0.1.2 auto-installed
+    piper under `auto`, and `auto` then resolved to it as "best installed" forever;
+    the machines that hit that window keep sounding worse than they should until
+    something notices, so both the planner and the banner ask this question."""
+    if cfg.get("voice_engine", "auto") != "auto":
+        return False
+    if det.get("voice_active") != "piper":
+        return False
+    return not (det.get("voice", {}) or {}).get("kokoro", False)
+
 
 def _upgrade_voice_note():
     return ('Say "upgrade voice" to add audio -- piper ({}, fast) or kokoro ({}, best quality).'
@@ -798,8 +834,15 @@ def status(cfg=None, det=None):
     voice_installed = det.get("voice", {}) or {}
     qa_models = det.get("qa", {}).get("models", []) or []
 
+    downgraded = voice_is_downgraded(cfg, det)
+
     def voice_active_note(level):
         if ffmpeg_ok:
+            if downgraded:
+                return ('Audio will be generated -- but piper sounds noticeably thinner than '
+                        'kokoro ({}), which is what "auto" installs now. Say "upgrade voice" '
+                        '(or let auto_setup fetch it on the next episode).'
+                        .format(VOICE_SIZE_HINTS["kokoro"]))
             return "Audio will be generated."
         # HIGH: never claim audio works when the one tool that produces the final
         # file is missing -- the ffmpeg warning below still fires separately.
@@ -874,11 +917,16 @@ def status(cfg=None, det=None):
     auto_setup_info = {
         "mode": plan["mode"],
         "user_said_never": plan["user_said_never"],
-        "missing": [c["component"] for c in plan["components"]],
+        # "missing" is a gap (no audio at all without it); "upgrades" is something
+        # that already works but shouldn't stay -- the skill words the two
+        # differently and must never block an episode on an upgrade.
+        "missing": [c["component"] for c in plan["components"] if not c.get("upgrade_from")],
+        "upgrades": [c["component"] for c in plan["components"] if c.get("upgrade_from")],
         "total_bytes": plan["total_bytes"],
     }
 
-    return {"voice": voice, "qa": qa, "delivery": delivery, "ffmpeg": ffmpeg_row,
+    return {"voice": voice, "qa": qa, "voice_downgraded": downgraded,
+            "delivery": delivery, "ffmpeg": ffmpeg_row,
             "auto_setup": auto_setup_info, "warnings": warnings, "ok": not warnings}
 
 
@@ -1486,6 +1534,11 @@ def run_selftest():
             # with truly nothing at all, ffmpeg included.
             nothing_det = shape(ffmpeg=None, ffprobe=None)
             everything_det = shape(
+                voice={"piper": True, "kokoro": True}, voice_active="kokoro",
+                qa={"whisper_cli": None, "faster_whisper": True, "models": ["base"]}, qa_active="base")
+            # The shape a 0.1.2 install is stuck in: piper renders, kokoro was never
+            # fetched, voice_engine=auto resolves to piper forever.
+            piper_only_det = shape(
                 voice={"piper": True, "kokoro": False}, voice_active="piper",
                 qa={"whisper_cli": None, "faster_whisper": True, "models": ["base"]}, qa_active="base")
 
@@ -1493,7 +1546,7 @@ def run_selftest():
             names = [c["component"] for c in plan["components"]]
             check("plan(always, nothing installed): ffmpeg first",
                   names and names[0] == "ffmpeg-static")
-            check("plan(always, nothing installed): voice-piper next", "voice-piper" in names)
+            check("plan(always, nothing installed): voice-kokoro next", "voice-kokoro" in names)
             check("plan(always, nothing installed): qa-base last", names and names[-1] == "qa-base")
             check("plan(always): total_bytes is the sum of its components",
                   plan["total_bytes"] == sum(c["bytes"] for c in plan["components"]))
@@ -1577,8 +1630,61 @@ def run_selftest():
 
             plan_kokoro = auto_setup_plan(dict(base_cfg, auto_setup="always", voice_engine="kokoro"), nothing_det)
             voice_targets = [c["target"] for c in plan_kokoro["components"] if c["kind"] == "voice"]
-            check("plan(always): explicit voice_engine=kokoro targets kokoro, not the piper default",
+            check("plan(always): explicit voice_engine=kokoro targets kokoro",
                   voice_targets == ["kokoro"])
+
+            # -- The regression this file exists to prevent: a fresh machine under the
+            # shipped default (voice_engine=auto, nothing installed) must auto-install
+            # the BEST engine. It shipped targeting piper in 0.1.2; auto then resolved
+            # to piper as "best installed" forever and the audio quality quietly
+            # dropped, with nothing in the banner saying a better engine existed. --
+            plan_auto = auto_setup_plan(dict(base_cfg, auto_setup="always", voice_engine="auto"), nothing_det)
+            auto_voice = [c for c in plan_auto["components"] if c["kind"] == "voice"]
+            check("plan(always): voice_engine=auto on a bare machine targets kokoro, not piper",
+                  [c["target"] for c in auto_voice] == ["kokoro"])
+            check("plan(always): the auto target's quoted size is kokoro's, not piper's",
+                  [c["bytes"] for c in auto_voice] == [VOICE_DISK_BYTES["kokoro"]]
+                  and [c["download_bytes"] for c in auto_voice] == [VOICE_DOWNLOAD_BYTES["kokoro"]])
+
+            plan_piper = auto_setup_plan(dict(base_cfg, auto_setup="always", voice_engine="piper"), nothing_det)
+            check("plan(always): explicit voice_engine=piper is still honoured (small/fast stays available)",
+                  [c["target"] for c in plan_piper["components"] if c["kind"] == "voice"] == ["piper"])
+
+            up_cfg = dict(base_cfg, auto_setup="always", voice_engine="auto")
+            check("downgraded: piper active + no kokoro under auto is a downgrade",
+                  voice_is_downgraded(up_cfg, piper_only_det) is True)
+            check("downgraded: kokoro active is not a downgrade",
+                  voice_is_downgraded(up_cfg, everything_det) is False)
+            check("downgraded: an explicit voice_engine=piper is a choice, not a downgrade",
+                  voice_is_downgraded(dict(up_cfg, voice_engine="piper"), piper_only_det) is False)
+            check("downgraded: nothing installed at all is a gap, not a downgrade",
+                  voice_is_downgraded(up_cfg, nothing_det) is False)
+
+            plan_up = auto_setup_plan(up_cfg, piper_only_det)
+            up_comps = [c for c in plan_up["components"] if c["kind"] == "voice"]
+            check("migration: a piper-only machine plans the kokoro upgrade",
+                  [c["component"] for c in up_comps] == ["voice-kokoro"])
+            check("migration: it is labelled an upgrade, not a missing piece",
+                  up_comps and up_comps[0].get("upgrade_from") == "piper")
+            check("migration: piper is not re-planned alongside it",
+                  "voice-piper" not in [c["component"] for c in plan_up["components"]])
+            check("migration: the upgrade's bytes are counted in the total",
+                  plan_up["total_bytes"] >= VOICE_DISK_BYTES["kokoro"])
+            check("migration: auto_setup=never never upgrades behind the user's back",
+                  auto_setup_plan(dict(up_cfg, auto_setup="never"), piper_only_det)["components"] == [])
+            check("migration: an explicit voice_engine=piper is left alone",
+                  not any(c["kind"] == "voice" for c in
+                          auto_setup_plan(dict(up_cfg, voice_engine="piper"), piper_only_det)["components"]))
+
+            st_up = status(up_cfg, piper_only_det)
+            check("migration: status flags the downgrade", st_up["voice_downgraded"] is True)
+            check("migration: the banner names kokoro in the voice row",
+                  "kokoro" in st_up["voice"]["note"])
+            check("migration: the upgrade is reported separately from real gaps",
+                  st_up["auto_setup"]["upgrades"] == ["voice-kokoro"]
+                  and "voice-kokoro" not in st_up["auto_setup"]["missing"])
+            check("migration: a healthy machine flags nothing",
+                  status(up_cfg, everything_det)["voice_downgraded"] is False)
 
             plan_satisfied = auto_setup_plan(dict(base_cfg, auto_setup="always"), everything_det)
             check("plan(always, everything already installed): nothing to do",

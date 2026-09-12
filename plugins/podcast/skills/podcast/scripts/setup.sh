@@ -1016,7 +1016,9 @@ PYFOUND
 
 # install_audio: the one-command path from nothing to a renderable episode --
 # ffmpeg-static (if not already present in ANY form, bundled or system) + the
-# smaller/faster voice engine (piper). Idempotent: each half is skipped by its own
+# best voice engine (kokoro) -- the same target autosetup picks under
+# voice_engine=auto, so the manual and automatic paths can't diverge in what a
+# user ends up listening to. Idempotent: each half is skipped by its own
 # installer's existing idempotency the moment it's already there, so a re-run (or
 # a run where one half was already installed some other way) just confirms and
 # moves on -- no separate "is this already done" logic needed here.
@@ -1036,11 +1038,11 @@ install_audio() {
       echo "warning: install ffmpeg by hand, or re-run: setup.sh install ffmpeg-static --yes -- audio won't render until then." >&2
     fi
   fi
-  install_voice_piper "$assume_yes"
+  install_voice_kokoro "$assume_yes"
   if _ffmpeg_available; then
-    echo "audio installed (ffmpeg + piper voice)."
+    echo "audio installed (ffmpeg + kokoro voice)."
   else
-    echo "piper voice installed, but ffmpeg is still missing -- see the warning above. Audio won't render until it's fixed."
+    echo "kokoro voice installed, but ffmpeg is still missing -- see the warning above. Audio won't render until it's fixed."
   fi
 }
 
@@ -1299,7 +1301,12 @@ if not d["components"]:
            if d["user_said_never"] else
            "auto-setup: nothing to do -- everything needed is already installed.")
 else:
-    names = ", ".join(c["component"] for c in d["components"])
+    # An upgrade says so: "downloading voice-kokoro" reads like a missing piece,
+    # and the one line the skill relays is the only thing the user ever sees.
+    names = ", ".join(
+        f"{c['component']} (upgrade from {c['upgrade_from']})" if c.get("upgrade_from")
+        else c["component"]
+        for c in d["components"])
 
     def fmt(n):
         return f"~{n / 1e9:.1f} GB" if n >= 1_000_000_000 else f"~{n / 1e6:.0f} MB"
@@ -1433,7 +1440,7 @@ usage() {
 usage: setup.sh status [--json]
        setup.sh install <component> [--yes]
                  components: ffmpeg-static | voice-piper | voice-kokoro | qa-base |
-                             qa-small | qa-medium | audio (= ffmpeg-static + voice-piper)
+                             qa-small | qa-medium | audio (= ffmpeg-static + voice-kokoro)
        setup.sh autosetup [--only audio] [--json]
                  installs whatever auto_setup + the config says is missing, in the
                  background-safe, non-interactive, priority order: ffmpeg, voice, qa.

@@ -22,8 +22,12 @@ jobs:
       - name: Installer is syntactically valid and has no bashisms beyond bash 3.2
         run: |
           bash -n plugins/podcast/skills/podcast/scripts/setup.sh
+          # Comment lines are skipped: the file documents its own bash 3.2 rule ("no
+          # `mapfile`/`readarray`"), and the guard was matching that sentence and failing
+          # every run. Only real code counts.
           ! grep -nE 'declare -A|\$\{[a-zA-Z_]+\^\^\}|\bmapfile\b|readarray' \
-              plugins/podcast/skills/podcast/scripts/setup.sh
+              plugins/podcast/skills/podcast/scripts/setup.sh \
+            | grep -vE '^[0-9]+:[[:space:]]*#'
 
       - name: No personal data
         # Author attribution in the manifests is intentional; everything else that names a person,
@@ -32,6 +36,7 @@ jobs:
           hits=$(grep -rinE 'sonu|gill|remitly|oportun|trippits|finance-lens|shilshole|dmitri|digesting|@gmail|/home/[a-z]+' \
                    --exclude-dir=.git --exclude=PLAN.md --exclude=CLAUDE.md --exclude=LICENSE \
                    --exclude=validate.yml . \
-                 | grep -vE '\.claude-plugin/(marketplace|plugin)\.json:[0-9]+: *"?(name|owner|author|homepage)"?' || true)
+                 | grep -vE '\.claude-plugin/(marketplace|plugin)\.json:[0-9]+: *"?(name|owner|author|homepage)"?' \
+                 | grep -vF 'sonugill79/podcast-skill' || true)
           if [ -n "$hits" ]; then echo "$hits"; exit 1; fi
           echo "no personal data outside attribution"

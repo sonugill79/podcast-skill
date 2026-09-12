@@ -18,6 +18,15 @@ Run `bash SCRIPTS/setup.sh status`.
 
 **Everything present** — one line saying so, then start the episode.
 
+**Audio works, but on the thinner engine** — `status --json` has `voice_downgraded: true`, or the voice row names
+piper while kokoro is absent. This is a plugin-0.1.2 install that auto-fetched piper before kokoro became the default
+under `auto`; it renders, it just sounds worse. Treat it like anything else in step 0: `autosetup` already plans it as
+an *upgrade* (`auto_setup.upgrades`, not `auto_setup.missing`), so launch it in the background, say in one line that
+the better voice is downloading and that this episode may still be in the old one, and get on with the research.
+**Never delay an episode for it** — piper renders now, and because `auto` resolves to the best *installed* engine at
+render time, the next render picks kokoro up by itself. Someone who set `voice_engine: piper` on purpose is left
+alone, and so is `auto_setup: never`.
+
 **Something missing** — the user asked for an episode, not a shopping list. Unless `auto_setup` is `never`:
 
 1. Launch `bash SCRIPTS/setup.sh autosetup` **in the background, immediately**. It installs what's missing in
@@ -43,8 +52,8 @@ These phrases still work if someone wants to drive it manually:
 
 | The user says | Do this |
 |---|---|
-| `upgrade audio` | `bash SCRIPTS/setup.sh install audio` — ffmpeg plus the smaller voice engine |
-| `upgrade voice` | `bash SCRIPTS/setup.sh install voice-piper` (~375 MB) or `voice-kokoro` (better voices, larger) |
+| `upgrade audio` | `bash SCRIPTS/setup.sh install audio` — ffmpeg plus the kokoro voice |
+| `upgrade voice` | `bash SCRIPTS/setup.sh install voice-kokoro` (~521 MB, best quality — the default) or `voice-piper` (~375 MB, faster, noticeably thinner) |
 | `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (~575 MB); `qa-small` and `qa-medium` are larger and more accurate |
 | `stop installing things` | `python3 SCRIPTS/config.py set auto_setup=never` |
 | `configure telegram` | Needs `~/.config/telegram-send/bots.json`; then `python3 SCRIPTS/config.py set telegram_bot=<name>` |
