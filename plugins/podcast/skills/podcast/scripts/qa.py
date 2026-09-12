@@ -479,6 +479,23 @@ FFMPEG_TIMEOUT = 60
 TRANSCRIBE_TIMEOUT = 1800
 
 
+def resolve_ffmpeg(which_config=_UNSET):
+    """Absolute path to ffmpeg from config.detect()['ffmpeg'] (a bundled,
+    sudo-free copy in the state dir is preferred there over PATH), falling back
+    to the bare 'ffmpeg' name -- resolved via PATH at exec time, same as always
+    -- when config isn't importable, so a bare checkout with no config.py still
+    works exactly as it did before this existed."""
+    cfg = config if which_config is _UNSET else which_config
+    if cfg:
+        try:
+            path = cfg.detect().get('ffmpeg')
+        except Exception:
+            path = None
+        if path:
+            return path
+    return 'ffmpeg'
+
+
 def _run_with_timeout(cmd, timeout, what):
     """subprocess.run with a timeout, turned into a clean exit 2 (a tool error --
     not a hang, not a raw traceback, and distinct from exit 3 "not installed" and
@@ -494,8 +511,15 @@ def transcribe(audio_path, workdir, model_override=None, which_config=_UNSET, wh
     once, and runs whichever backend was picked."""
     backend, tool, model = select_backend(model_override, which_config=which_config, which_fn=which_fn)
     wav = os.path.join(workdir, 'audio.wav')
-    _run_with_timeout(['ffmpeg', '-y', '-loglevel', 'error', '-i', audio_path,
-                       '-ar', '16000', '-ac', '1', wav], FFMPEG_TIMEOUT, 'ffmpeg (convert)')
+    ffmpeg_path = resolve_ffmpeg(which_config=which_config)
+    try:
+        _run_with_timeout([ffmpeg_path, '-y', '-loglevel', 'error', '-i', audio_path,
+                           '-ar', '16000', '-ac', '1', wav], FFMPEG_TIMEOUT, 'ffmpeg (convert)')
+    except FileNotFoundError:
+        # Distinct from select_backend()'s "audio QA not installed" (that's about
+        # the transcription backend, not the resample step) -- ffmpeg is a
+        # separate native binary this needs regardless of which backend is used.
+        die('ffmpeg not found — run: /podcast upgrade audio', 3)
     if backend == 'whispercpp':
         out_prefix = os.path.join(workdir, 't')
         _run_with_timeout([tool, '-m', model, '-f', wav, '-t', '8', '-np',
@@ -1302,6 +1326,38 @@ def run_selftest():
           resolve_whisper_cli(which_config=FakeQAConfig(), which_fn=fake_which) == '/opt/fake/whisper-cli')
     check('resolve_whisper_cli: None when config is absent and PATH has nothing',
           resolve_whisper_cli(which_config=None, which_fn=no_which) is None)
+
+    # resolve_ffmpeg: config-supplied absolute path (a bundled, sudo-free copy)
+    # wins over the bare PATH-resolved name; absent config, the fallback is
+    # exactly what this script always shot at before ffmpeg resolution existed.
+    check('resolve_ffmpeg: uses the config-supplied absolute path when config has one',
+          resolve_ffmpeg(which_config=FakeQAConfig(detect={'ffmpeg': '/state/bin/ffmpeg'}))
+          == '/state/bin/ffmpeg')
+    check('resolve_ffmpeg: falls back to the bare name on PATH when config is absent',
+          resolve_ffmpeg(which_config=None) == 'ffmpeg')
+    check('resolve_ffmpeg: falls back to the bare name when config has nothing for it',
+          resolve_ffmpeg(which_config=FakeQAConfig(detect={})) == 'ffmpeg')
+    check('resolve_ffmpeg: a raising config.detect() falls back to the bare name rather than crashing',
+          resolve_ffmpeg(which_config=FakeQAConfig(raise_detect=True)) == 'ffmpeg')
+
+    # The two "can't run QA" exit-3 messages must stay textually distinct: a
+    # missing ffmpeg is not the same problem as no transcription backend installed.
+    ffmpeg_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(ffmpeg_buf):
+            die('ffmpeg not found — run: /podcast upgrade audio', 3)
+    except SystemExit:
+        pass
+    no_backend_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(no_backend_buf):
+            die('audio QA not installed — run: /podcast upgrade qa', 3)
+    except SystemExit:
+        pass
+    check('the ffmpeg-missing and no-backend-installed messages are textually distinct',
+          ffmpeg_buf.getvalue() != no_backend_buf.getvalue())
+    check('...the ffmpeg message names ffmpeg specifically',
+          'ffmpeg' in ffmpeg_buf.getvalue() and 'ffmpeg' not in no_backend_buf.getvalue())
 
     check('resolve_qa_level: config.load()[qa_level] wins over detect()[qa_active]',
           resolve_qa_level(FakeQAConfig(load={'qa_level': 'medium'}, detect={'qa_active': 'small'})) == 'medium')
