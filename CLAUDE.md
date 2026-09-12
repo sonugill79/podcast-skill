@@ -28,6 +28,14 @@ mechanics, the file contracts, the privacy gate and the acceptance test.
 
 Every script has an offline `--selftest`; run them all after any change.
 
+## Releasing
+
+`claude plugin update` compares the **manifest version**, not the git commit. A fix merged without a version bump is
+never served to anyone who already installed — the CLI says "already at the latest version" and keeps the cached copy.
+**Every user-visible change bumps `version` in both `plugins/podcast/.claude-plugin/plugin.json` and the matching
+entry in `.claude-plugin/marketplace.json`.** Verified end to end on 2026-09-12: 0.1.0 refused to update, 0.1.1 updated
+and immediately picked up the fix.
+
 ## Working here
 
 - Validate manifests with `claude plugin validate --strict plugins/podcast` and `... --strict .` before pushing.
