@@ -1,0 +1,10 @@
+# Known transcription quirks: cases where the voice is correct but whisper writes something else.
+# Format: expected ~ heard      (compared after normalisation: lowercase, no punctuation, possessives stripped)
+#
+# Add a pair only after an isolated round-trip proves the audio is right.
+# Structural problems (missing, repeated or garbled audio) must never be silenced here — re-render instead.
+#
+# Common, safe starters:
+want to ~ wanna
+going to ~ gonna
+okay ~ ok

@@ -1,0 +1,51 @@
+{
+  "name": "podcast",
+  "description": "Research any topic and turn it into a verified, two-host, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Sonu Gill"
+  },
+  "homepage": "https://github.com/sonugill79/podcast-skill",
+  "keywords": [
+    "podcast",
+    "audio",
+    "research",
+    "tts",
+    "briefing",
+    "interview-prep"
+  ],
+  "userConfig": {
+    "episodes_dir": {
+      "title": "Episodes folder",
+      "type": "string",
+      "description": "Where episodes are written (script, sources, audio).",
+      "default": "~/podcast-episodes"
+    },
+    "voice_engine": {
+      "title": "Voice engine",
+      "type": "string",
+      "description": "auto (use the best installed), none (script only), piper (\u2248375 MB on disk, fast) or kokoro (better quality, adds a 338 MB model). Nothing downloads until you ask. Change later with: /podcast upgrade voice",
+      "default": "auto"
+    },
+    "qa_level": {
+      "title": "Audio QA level",
+      "type": "string",
+      "description": "auto (use what's installed), none (skip), base (\u2248575 MB including the transcription runtime), small or medium (larger, more accurate). Checks rendered audio against the script. Change later with: /podcast upgrade qa",
+      "default": "auto"
+    },
+    "telegram_bot": {
+      "title": "Telegram bot name (optional)",
+      "type": "string",
+      "description": "Name of a bot in ~/.config/telegram-send/bots.json to deliver episodes to. Leave blank to just save the file locally.",
+      "default": "",
+      "required": false
+    },
+    "listener_profile": {
+      "title": "Listener profile (optional)",
+      "type": "string",
+      "description": "Path to a markdown file describing who is listening, so episodes speak to you directly. Leave blank for a neutral audience.",
+      "default": "",
+      "required": false
+    }
+  }
+}
