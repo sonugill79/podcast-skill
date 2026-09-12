@@ -237,6 +237,13 @@ render in the foreground when non-interactive.
 Overwriting that file (as I did when adding permissions) silently disables the plugin — `plugin list` shows
 `✘ disabled` and the skill simply vanishes from the session. Merge into that file, never replace it.
 
+## 7h. Release discipline (learned the hard way, 2026-09-12)
+
+After merging the install-options fix, `claude plugin update` reported **"already at the latest version (0.1.0)"** and
+kept serving the cached copy — Claude Code compares manifest versions, not commits. Bumping both manifests to 0.1.1
+made the update land, and the installed copy then honoured the install-time answers (episodes dir and voice engine).
+**Every user-visible change needs a version bump in both manifests**; this is now in `CLAUDE.md`.
+
 ## 8. Known risks
 
 - ~~espeak-ng needed~~ — **disproved**: both engines bundle phonemization. `detect()` still reports it, informational only.
