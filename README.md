@@ -9,12 +9,15 @@ Nothing is sent anywhere. Research uses ordinary web requests; the voice and the
 ## Install
 
 ```
-/plugin marketplace add <owner>/podcast-skill
+/plugin marketplace add sonugill79/podcast-skill
 /plugin install podcast@podcast-skill
 ```
 
 You'll be asked a few questions (where to save episodes, which voice, optional Telegram). Change them any time with
-`/plugin configure podcast`.
+`/plugin configure podcast@podcast-skill`.
+
+**Restart your session after installing.** Skills are loaded when a session starts, so `/podcast` won't exist in the
+session you installed from — quit, start Claude again, and it's there.
 
 Then:
 
