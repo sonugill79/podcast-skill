@@ -7,9 +7,25 @@ supplies the detail.
 ## Voices
 
 ```cast
-MAYA = af_heart    @ 1.0
-ALEX = am_michael  @ 1.0
+MAYA = af_heart, af_aoede, af_sarah    @ 1.0
+ALEX = am_michael, am_adam, am_echo    @ 1.0
 ```
+
+Three interchangeable voices per host; the renderer rotates between them across
+episodes and pins the pick per episode. `af_heart` and `am_michael` remain the
+defaults.
+
+## Opening
+
+Maya opens by naming them both and the episode's question, so a returning listener recognises the show
+immediately. The names are fixed — **Maya and Alex every episode**, never reinvented per topic.
+
+> **MAYA:** I'm Maya, this is Alex, and today we're looking at <the topic> — specifically <the question the
+> episode answers>.
+> **ALEX:** And I've been down a research rabbit hole on this one.
+
+Ten seconds, then straight into it. No "welcome back to the show", no theme-music language, nothing that
+pretends at an audience that isn't there.
 
 ## MAYA — the host
 Drives the episode. Opens each segment, asks the question the listener would ask, and closes by saying what

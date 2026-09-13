@@ -13,11 +13,22 @@ away knowing which parts are settled, which are genuinely open, and where the ev
   the closing segment from "where the evidence points" to "what you should do".
 - Any position they already lean toward, so the research can be told to attack it hardest.
 
+## Two question shapes
+
+The research split depends on which one you have. Decide first, and say which in `brief.md`.
+
+- **Proposition** — "Is X worth it?", "Should we do Y?" One thing, argued for and against.
+- **Versus** — "Codex or Claude Code?", "Postgres or Mongo for this?" Two named options, each with a champion.
+
+They are not the same research job. On a versus question, "the case for" is meaningless — each side is a
+*partisan of one option*, and part of that partisan's job is the honest case against the other. Getting this
+wrong produces two agents researching the same thing.
+
 ## Research areas (one agent each)
 | # | Area | Focus |
 |---|---|---|
-| 1 | **The case FOR, at full strength** | Build the strongest version of the affirmative — the one its most credible proponents actually argue. Named people and organisations, their real words, the evidence they cite. Never a summary of "supporters say"; find who says it and what they said |
-| 2 | **The case AGAINST, at full strength** | The same, mirrored. The most serious objection, from the most credible objector — not the easiest one to knock down |
+| 1 | **Side A at full strength** | *Proposition:* the strongest case FOR, as its most credible proponents actually argue it. *Versus:* champion option A — its real strengths **and** the honest case against option B, the objections A's advocates actually raise. Named people and organisations, their real words, the evidence they cite. Never a summary of "supporters say"; find who says it and what they said |
+| 2 | **Side B at full strength** | The same, mirrored. *Proposition:* the most serious objection, from the most credible objector — not the easiest one to knock down. *Versus:* champion option B on its own merits and name what B's advocates say A gets wrong |
 | 3 | Common ground & the settled facts | What both sides accept: definitions, numbers, timelines, the record. This is the floor the debate stands on, and it keeps the episode from arguing about facts instead of about the question |
 | 4 | The evidence itself | The actual studies, filings, datasets or primary documents both sides point at. What each one measured, its sample, its date, its funding, what it does **not** show |
 | 5 | Where the disagreement really is | Is it about facts, about values, or about what counts as acceptable risk? Most durable disagreements are not factual, and naming that is the most useful thing the episode does |
@@ -25,6 +36,11 @@ away knowing which parts are settled, which are genuinely open, and where the ev
 Run 1 and 2 **as separate agents with no knowledge of each other's output** — each is told to make its side as
 strong as it honestly can. Merging them afterwards is the point: an argument written by one agent playing both
 parts converges into mush.
+
+Each side agent is briefed as a partisan doing real research, not as a debater improvising: go find who holds
+this position, what they actually said, and what evidence they point at. A side agent that returns rhetoric
+with no sources has failed, and the script must not paper over it — say on air that one side's case is thinly
+evidenced, because that is itself the finding.
 
 `quick` depth merges 3+4 and keeps 1, 2 and 5 (3 agents). Never drop 1 or 2 — they are the episode.
 
@@ -37,6 +53,12 @@ parts converges into mush.
 6. HOST presses both: the weakest link in each case, named (12%)
 7. HOST: where the disagreement actually lives — fact, value, or risk tolerance (7%)
 8. HOST: where the evidence points today, what would change it, and what could not be verified (5%)
+
+On a **versus** question, segment 8 lands differently and this is usually the most useful minute in the
+episode: not "which is better" but **who should pick which**. Name the reader profile each option wins for —
+the team size, the constraint, the workflow, the budget — because two good options rarely lose to each other
+outright, they lose to a mismatch. "If you're X, take A; if you're Y, take B; here's the one case where it
+genuinely doesn't matter."
 
 ## Must verify yourself
 - **Every position is attributed to someone who holds it.** A claim of the form "critics argue…" with no

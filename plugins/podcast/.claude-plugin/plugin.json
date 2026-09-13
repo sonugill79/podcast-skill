@@ -33,6 +33,13 @@
       "description": "Who hosts an episode when the request doesn't say: two-host (a host and a co-host), panel (moderator, advocate and skeptic \u2014 used automatically for debates) or solo (one narrator). Any name in casts/ works. Change later with: /podcast --cast <name>",
       "default": "two-host"
     },
+    "voice_blocklist": {
+      "title": "Voices to never use",
+      "type": "string",
+      "description": "Comma-separated voice ids to drop from every cast's rotation, e.g. af_nova,am_santa. Say \u201cI don't like that voice\u201d during an episode and it gets added here.",
+      "default": "",
+      "required": false
+    },
     "qa_level": {
       "title": "Audio QA level",
       "type": "string",

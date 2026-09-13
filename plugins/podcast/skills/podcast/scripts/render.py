@@ -208,7 +208,8 @@ CAST_FENCE = 'cast'
 
 
 def parse_cast(text, source='<cast>'):
-    """Parse a cast file's ```cast block into ({SPEAKER: voice}, {SPEAKER: speed}).
+    """Parse a cast file's ```cast block into ({SPEAKER: voice}, {SPEAKER: speed},
+    {SPEAKER: [voice, ...]}) -- the third is the rotation pool for each slot.
 
     The block is the one machine-readable part of an otherwise prose file -- the
     rest of a cast describes how each host talks, which only the script writer
@@ -237,7 +238,7 @@ def parse_cast(text, source='<cast>'):
     if end is None:
         die(f'{source}:{start}: ```{CAST_FENCE} block is never closed', 2)
 
-    voices, speeds = {}, {}
+    voices, speeds, pools = {}, {}, {}
     for offset, raw in enumerate(lines[start:end]):
         n = start + offset + 1  # 1-based, for the error message
         line = raw.split('#', 1)[0].strip()
@@ -247,9 +248,17 @@ def parse_cast(text, source='<cast>'):
             die(f'{source}:{n}: expected SPEAKER = voice [@ speed], got: {raw.strip()[:60]!r}', 2)
         speaker, rest = line.split('=', 1)
         speaker = speaker.strip()
-        voice, _, speed_text = (x.strip() for x in rest.partition('@'))
-        if not speaker or not voice:
-            die(f'{source}:{n}: expected SPEAKER = voice [@ speed], got: {raw.strip()[:60]!r}', 2)
+        voice_text, _, speed_text = (x.strip() for x in rest.partition('@'))
+        # A slot may offer several interchangeable voices; one is chosen per episode
+        # (see choose_voices). The first is the slot's default and its --no-rotate
+        # pick, so put the safest choice first.
+        pool = [v.strip() for v in voice_text.split(',') if v.strip()]
+        if not speaker or not pool:
+            die(f'{source}:{n}: expected SPEAKER = voice[, voice...] [@ speed], '
+                f'got: {raw.strip()[:60]!r}', 2)
+        if len(set(pool)) != len(pool):
+            die(f'{source}:{n}: {speaker} lists the same voice twice', 2)
+        voice = pool[0]
         if speaker in voices:
             die(f'{source}:{n}: {speaker} is listed twice in the cast', 2)
         speed = 1.0
@@ -265,9 +274,17 @@ def parse_cast(text, source='<cast>'):
                 die(f'{source}:{n}: speed {speed} is outside 0.5-2.0', 2)
         voices[speaker] = voice
         speeds[speaker] = speed
+        pools[speaker] = pool
     if not voices:
         die(f'{source}: the ```{CAST_FENCE} block is empty -- no speakers declared', 2)
-    return voices, speeds
+    return voices, speeds, pools
+
+
+def parse_voices_list(spec):
+    """"af_nova, am_santa" -> ['af_nova', 'am_santa']; anything falsy -> []."""
+    if not spec:
+        return []
+    return [v.strip() for v in str(spec).split(',') if v.strip()]
 
 
 def parse_speeds(spec):
@@ -288,6 +305,70 @@ def parse_speeds(spec):
     return speeds
 
 
+# Sentinel for "argument not supplied", so a caller can pass None meaningfully.
+_UNSET = object()
+
+ROTATION_FILE = 'voice-rotation.json'
+LOCK_NAME = 'cast.lock.json'
+
+
+def _read_json(path, default):
+    try:
+        with open(path, encoding='utf-8') as f:
+            v = json.load(f)
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def rotation_path(which_config=_UNSET):
+    cfg = config if which_config is _UNSET else which_config
+    if not cfg:
+        return None
+    try:
+        return os.path.join(cfg.state_dir(), ROTATION_FILE)
+    except Exception:
+        return None
+
+
+def choose_voices(pools, recent=None, blocked=(), rotate=True):
+    """Pick one voice per slot: the least recently used one that isn't blocked.
+
+    `recent` maps slot -> list of voice ids, most recent last (what the previous
+    episodes used). Rotation keeps a series from sounding identical every week
+    without ever being random -- random would re-pick on every re-render and blow
+    the per-line TTS cache, which is keyed on the voice.
+
+    Blocked voices are dropped first: "I don't like that voice" should hold across
+    every cast, so it is a user setting rather than a cast edit."""
+    blocked = {b.strip() for b in blocked if b and b.strip()}
+    recent = recent or {}
+    chosen = {}
+    for slot, pool in pools.items():
+        allowed = [v for v in pool if v not in blocked]
+        if not allowed:
+            die(f'{slot}: every voice in this cast slot ({", ".join(pool)}) is on the '
+                f'blocklist -- clear one with: config.py set voice_blocklist=<ids>', 2)
+        if not rotate:
+            chosen[slot] = allowed[0]
+            continue
+        history = [v for v in recent.get(slot, []) if v in allowed]
+        # Least recently used, ties broken by the cast's own order.
+        chosen[slot] = min(allowed, key=lambda v: (history.index(v) if v in history else -1,
+                                                    allowed.index(v)))
+    return chosen
+
+
+def record_rotation(recent, chosen, keep=8):
+    """Fold this episode's picks into the history, most recent last."""
+    out = {k: list(v) for k, v in (recent or {}).items()}
+    for slot, voice in chosen.items():
+        hist = [v for v in out.get(slot, []) if v != voice]
+        hist.append(voice)
+        out[slot] = hist[-keep:]
+    return out
+
+
 def resolve_cast(args, engine_id):
     """(voices, speeds) from --cast / --voices / --speeds / the engine default table.
 
@@ -295,25 +376,68 @@ def resolve_cast(args, engine_id):
     --cast file, then explicit --voices / --speeds entries (per speaker, so one
     voice can be swapped without restating the cast). --speed stays the baseline
     for any speaker a cast doesn't pace."""
-    voices = {}
-    speeds = {}
+    voices, speeds, pools = {}, {}, {}
     if args.cast:
         try:
             with open(args.cast, encoding='utf-8') as f:
                 text = f.read()
         except OSError as e:
             die(f'--cast {args.cast}: {e.strerror or e}', 2)
-        voices, speeds = parse_cast(text, args.cast)
+        voices, speeds, pools = parse_cast(text, args.cast)
     elif not args.voices:
         voices = default_voices_for(engine_id or 'kokoro')
     if args.voices:
-        voices.update(parse_voices(args.voices))
+        explicit = parse_voices(args.voices)
+        voices.update(explicit)
+        # An explicitly named voice is a decision, not a suggestion -- it leaves the
+        # rotation entirely rather than becoming a one-entry pool alongside it.
+        for sp in explicit:
+            pools.pop(sp, None)
     if args.speeds:
         speeds.update(parse_speeds(args.speeds))
     speeds = {sp: speeds.get(sp, args.speed) for sp in voices}
     if (engine_id or '').startswith('kokoro'):
         validate_kokoro_voices(voices, args.cast or '--voices')
-    return voices, speeds
+    return voices, speeds, pools
+
+
+def apply_rotation(voices, pools, args, cache_dir):
+    """Resolve each rotating slot to one voice, and remember the choice.
+
+    A lock file in the episode's own cache dir pins the picks, so re-rendering an
+    episode after fixing three lines gets the same voices (and the same warm cache)
+    rather than a new draw."""
+    rotating = {sp: pool for sp, pool in pools.items() if len(pool) > 1}
+    if not rotating:
+        return voices, None
+    lock_path = os.path.join(cache_dir, LOCK_NAME)
+    locked = _read_json(lock_path, {})
+    pinned = {sp: v for sp, v in locked.items() if sp in rotating and v in rotating[sp]}
+    todo = {sp: pool for sp, pool in rotating.items() if sp not in pinned}
+
+    blocked = list(args.exclude_voices)
+    rot_path = rotation_path()
+    recent = _read_json(rot_path, {}) if rot_path else {}
+    fresh = choose_voices(todo, recent, blocked, rotate=not args.no_rotate) if todo else {}
+
+    chosen = dict(pinned, **fresh)
+    out = dict(voices, **chosen)
+    if fresh and rot_path:
+        try:
+            atomic_write(rot_path, lambda tmp: _write_json(tmp, record_rotation(recent, fresh)))
+        except OSError:
+            pass  # an unwritable state dir must never fail a render
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        atomic_write(lock_path, lambda tmp: _write_json(tmp, chosen))
+    except OSError:
+        pass
+    return out, {'chosen': chosen, 'pinned': sorted(pinned), 'pools': rotating}
+
+
+def _write_json(path, obj):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, indent=2)
 
 
 def default_voices_for(engine_id):
@@ -322,7 +446,6 @@ def default_voices_for(engine_id):
     return dict(ENGINE_DEFAULTS.get(engine_id, ENGINE_DEFAULTS['kokoro'])['voices'])
 
 
-_UNSET = object()
 
 
 def select_engine(cli_engine, which_config=_UNSET):
@@ -549,6 +672,45 @@ def build_ffmetadata(tags, chapter_records, duration):
     return '\n'.join(lines) + '\n'
 
 
+def encode_mp3(wav_path, out_path, tags, chapter_records=(), duration=None,
+                cover=None, ffmpeg_path=None):
+    """Encode WAV -> tagged, chaptered MP3 and clean up the sidecar metadata file.
+
+    One place, so every mp3 this skill produces is loudness-normalised the same way
+    and carries the same tag set -- an episode and a voice audition included."""
+    import subprocess  # local, matching this file's style for non-hot-path imports
+    ffmpeg_path = resolve_ffmpeg() if ffmpeg_path is None else ffmpeg_path
+    if duration is None and chapter_records:
+        duration = max(float(c['start']) for c in chapter_records) + 1.0
+    meta_path = os.path.splitext(out_path)[0] + '.ffmetadata'
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        f.write(build_ffmetadata(tags, list(chapter_records), duration or 0.0))
+    cmd = [ffmpeg_path, '-y', '-loglevel', 'error', '-i', wav_path, '-i', meta_path]
+    if cover:
+        if not os.path.exists(cover):
+            die(f'--cover {cover}: no such file', 2)
+        cmd += ['-i', cover]
+    cmd += ['-map_metadata', '1', '-map', '0:a']
+    if cover:
+        # An attached picture is a video stream to ffmpeg; copy it through and mark
+        # it as front cover art so players show it instead of trying to play it.
+        cmd += ['-map', '2:v', '-c:v', 'copy', '-disposition:v:0', 'attached_pic']
+    cmd += ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ac', '1', '-b:a', '96k',
+            '-id3v2_version', '3', '-write_id3v1', '1', out_path]
+    try:
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        # Distinct from "no voice engine installed" and "audio runtime incomplete"
+        # -- the engine and its Python runtime can both be fine while ffmpeg (a
+        # separate native binary, previously assumed to be on PATH) is what's
+        # missing. Named specifically so the fix is obvious rather than sending
+        # someone back down the voice-engine troubleshooting path.
+        die('ffmpeg not found — run: /podcast upgrade audio', 3)
+    finally:
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
+
+
 def fmt_mmss(seconds):
     seconds = max(0.0, seconds)
     return f'{int(seconds // 60)}:{int(seconds % 60):02d}'
@@ -569,6 +731,13 @@ def build_arg_parser():
     ap.add_argument('--cast', default=None,
                      help='cast file (see casts/); its ```cast block binds each '
                           'SPEAKER to a voice and an optional pace')
+    ap.add_argument('--no-rotate', action='store_true',
+                     help="always take a cast slot's first voice instead of rotating "
+                          'between its alternatives')
+    ap.add_argument('--exclude-voices', default='', type=lambda v: [x.strip() for x in v.split(',') if x.strip()],
+                     help='voice ids to drop from every rotation pool, comma-separated '
+                          "(a user's \"not that one\" list; config voice_blocklist is "
+                          'merged in automatically)')
     ap.add_argument('--speeds', default=None,
                      help='SPEAKER=1.05[,SPEAKER=0.98...] -- per-speaker pace, '
                           'overriding a --cast entry or --speed for those speakers')
@@ -945,16 +1114,16 @@ def run_selftest():
         def cast_text(body):
             return '# Cast: test\n\nprose a reader sees\n\n## Voices\n\n```cast\n' + body + '```\n\nmore prose\n'
 
-        cv, cs = parse_cast(cast_text('MODERATOR = bf_emma @ 0.98\nSKEPTIC = af_nicole\n'))
+        cv, cs, cp = parse_cast(cast_text('MODERATOR = bf_emma @ 0.98\nSKEPTIC = af_nicole\n'))
         check('cast: speakers and voices parsed',
               cv == {'MODERATOR': 'bf_emma', 'SKEPTIC': 'af_nicole'})
         check('cast: an @ speed is read', cs['MODERATOR'] == 0.98)
         check('cast: a speaker with no @ defaults to 1.0', cs['SKEPTIC'] == 1.0)
 
-        cv3, _ = parse_cast(cast_text('A = af_heart\nB = am_michael\nC = bm_george\n'))
+        cv3, _, _ = parse_cast(cast_text('A = af_heart\nB = am_michael\nC = bm_george\n'))
         check('cast: three speakers is not a special case', len(cv3) == 3)
 
-        cv_c, cs_c = parse_cast(cast_text(
+        cv_c, cs_c, _ = parse_cast(cast_text(
             '# a comment line\n\nHOST = af_bella @ 1.02  # trailing comment\n'))
         check('cast: comments and blank lines are ignored',
               cv_c == {'HOST': 'af_bella'} and cs_c['HOST'] == 1.02)
@@ -994,9 +1163,11 @@ def run_selftest():
             def __init__(self, **kw):
                 self.cast = self.voices = self.speeds = None
                 self.speed = 1.0
+                self.no_rotate = False
+                self.exclude_voices = []
                 self.__dict__.update(kw)
 
-        v_def, s_def = resolve_cast(FakeArgs(), 'kokoro')
+        v_def, s_def, _ = resolve_cast(FakeArgs(), 'kokoro')
         check('resolve_cast: no flags -> the engine default table',
               v_def == default_voices_for('kokoro'))
         check('resolve_cast: default table is paced at --speed',
@@ -1004,19 +1175,19 @@ def run_selftest():
         check('resolve_cast: --speed becomes the baseline for every speaker',
               set(resolve_cast(FakeArgs(speed=1.1), 'kokoro')[1].values()) == {1.1})
 
-        v_ov, _ = resolve_cast(FakeArgs(voices='MAYA=af_sky'), 'kokoro')
+        v_ov, _, _ = resolve_cast(FakeArgs(voices='MAYA=af_sky'), 'kokoro')
         check('resolve_cast: --voices alone still works (no cast)', v_ov['MAYA'] == 'af_sky')
 
         with tempfile.TemporaryDirectory() as td:
             cast_path = os.path.join(td, 'panel.md')
             with open(cast_path, 'w', encoding='utf-8') as f:
                 f.write(cast_text('MODERATOR = bf_emma @ 0.98\nADVOCATE = am_michael @ 1.04\n'))
-            v_c, s_c = resolve_cast(FakeArgs(cast=cast_path), 'kokoro')
+            v_c, s_c, p_c = resolve_cast(FakeArgs(cast=cast_path), 'kokoro')
             check('resolve_cast: --cast replaces the default table, it does not merge',
                   set(v_c) == {'MODERATOR', 'ADVOCATE'})
             check('resolve_cast: --cast carries its paces', s_c['ADVOCATE'] == 1.04)
 
-            v_m, s_m = resolve_cast(
+            v_m, s_m, p_m = resolve_cast(
                 FakeArgs(cast=cast_path, voices='ADVOCATE=am_adam', speeds='MODERATOR=1.0'), 'kokoro')
             check('resolve_cast: --voices overrides one cast voice, keeps the rest',
                   v_m == {'MODERATOR': 'bf_emma', 'ADVOCATE': 'am_adam'})
@@ -1029,6 +1200,63 @@ def run_selftest():
                 check('resolve_cast: a missing --cast file exits 2', e.code == 2)
             else:
                 check('resolve_cast: a missing --cast file exits 2', False)
+
+        # ------------------------------------------------------- rotation pools
+        pv2, ps2, pp2 = parse_cast(cast_text('HOST = bf_lily, af_aoede, bm_george @ 0.98\n'))
+        check('cast: a comma list becomes a rotation pool',
+              pp2['HOST'] == ['bf_lily', 'af_aoede', 'bm_george'])
+        check('cast: the first pool entry is the slot default', pv2['HOST'] == 'bf_lily')
+        check('cast: one pace applies to the whole pool', ps2['HOST'] == 0.98)
+        check('cast: a single voice is a pool of one',
+              parse_cast(cast_text('HOST = af_heart\n'))[2]['HOST'] == ['af_heart'])
+        cast_dies('HOST = af_heart, af_heart\n', 'cast: the same voice twice in one pool exits 2')
+
+        pools3 = {'HOST': ['a', 'b', 'c']}
+        check('rotation: with no history, the first voice is taken',
+              choose_voices(pools3)['HOST'] == 'a')
+        check('rotation: the least recently used voice is next',
+              choose_voices(pools3, {'HOST': ['a']})['HOST'] == 'b')
+        check('rotation: history of two moves to the third',
+              choose_voices(pools3, {'HOST': ['a', 'b']})['HOST'] == 'c')
+        check('rotation: a full cycle wraps to the oldest',
+              choose_voices(pools3, {'HOST': ['a', 'b', 'c']})['HOST'] == 'a')
+        check('rotation: order is by recency, not by pool position',
+              choose_voices(pools3, {'HOST': ['b', 'c', 'a']})['HOST'] == 'b')
+        check('rotation: --no-rotate always takes the default',
+              choose_voices(pools3, {'HOST': ['a', 'b']}, rotate=False)['HOST'] == 'a')
+        check('rotation: history naming a voice no longer in the pool is ignored',
+              choose_voices(pools3, {'HOST': ['gone', 'a']})['HOST'] == 'b')
+
+        check('blocklist: a blocked voice is never chosen',
+              choose_voices(pools3, {}, blocked=['a'])['HOST'] == 'b')
+        check('blocklist: blocking cascades to the next available',
+              choose_voices(pools3, {}, blocked=['a', 'b'])['HOST'] == 'c')
+        check('blocklist: whitespace and empties in the list are ignored',
+              choose_voices(pools3, {}, blocked=[' a ', '', None])['HOST'] == 'b')
+        try:
+            choose_voices(pools3, {}, blocked=['a', 'b', 'c'])
+        except SystemExit as e:
+            check('blocklist: blocking a whole slot exits 2 with a fixable message', e.code == 2)
+        else:
+            check('blocklist: blocking a whole slot exits 2 with a fixable message', False)
+
+        multi = choose_voices({'HOST': ['a', 'b'], 'GUEST': ['x', 'y']}, {'HOST': ['a']})
+        check('rotation: each slot rotates independently',
+              multi == {'HOST': 'b', 'GUEST': 'x'})
+
+        # record_rotation(): history is most-recent-last and bounded.
+        h1 = record_rotation({}, {'HOST': 'a'})
+        check('history: a first pick is recorded', h1 == {'HOST': ['a']})
+        h2 = record_rotation(h1, {'HOST': 'b'})
+        check('history: the newest pick goes last', h2['HOST'] == ['a', 'b'])
+        h3 = record_rotation(h2, {'HOST': 'a'})
+        check('history: re-picking a voice moves it to the end, not duplicated',
+              h3['HOST'] == ['b', 'a'])
+        long_hist = {'HOST': [str(i) for i in range(12)]}
+        check('history: is trimmed to the keep window',
+              len(record_rotation(long_hist, {'HOST': 'new'}, keep=8)['HOST']) == 8)
+        check('history: other slots are left alone',
+              record_rotation({'A': ['1'], 'B': ['2']}, {'A': '3'})['B'] == ['2'])
 
         # Per-speaker pace must reach the cache key, or two speakers at different
         # paces would serve each other's audio for the same line.
@@ -1069,13 +1297,17 @@ def run_selftest():
         cast_files = [f for f in shipped
                       if open(f, encoding='utf-8').read().lstrip().startswith('# Cast:')]
         check('casts/ ships at least the three documented casts', len(cast_files) >= 3)
-        check('casts/ has a README that is not itself parsed as a cast',
-              os.path.exists(os.path.join(CASTS_DIR, 'README.md'))
-              and len(cast_files) == len(shipped) - 1)
+        # The prose docs in casts/ must not be mistaken for casts, and every file
+        # that isn't a doc must be one -- so a new cast can't be added without the
+        # "# Cast:" header that makes it discoverable.
+        docs = {'README.md', 'VOICES.md'}
+        check('casts/ ships its prose docs and they are not parsed as casts',
+              docs <= {os.path.basename(f) for f in shipped}
+              and len(cast_files) == len(shipped) - len(docs))
         for path in cast_files:
             name = os.path.basename(path)
             try:
-                cvoices, cspeeds = parse_cast(open(path, encoding='utf-8').read(), path)
+                cvoices, cspeeds, cpools = parse_cast(open(path, encoding='utf-8').read(), path)
             except SystemExit:
                 check(f'shipped cast parses: {name}', False)
                 continue
@@ -1088,7 +1320,7 @@ def run_selftest():
                   len(set(cvoices.values())) == len(cvoices))
         panel = os.path.join(CASTS_DIR, 'panel.md')
         if os.path.exists(panel):
-            pv, _ = parse_cast(open(panel, encoding='utf-8').read(), panel)
+            pv, _, ppools = parse_cast(open(panel, encoding='utf-8').read(), panel)
             check('panel is the three-voice cast the debate angle expects',
                   set(pv) == {'HOST', 'ADVOCATE', 'SKEPTIC'})
             # Two same-accent, same-gender voices in one episode is the classic
@@ -1586,7 +1818,7 @@ def main():
         # word/duration estimate never needs to know which engine would render it.
         # No real engine is resolved for a dry run, so the cast is resolved against
         # kokoro's table -- only the speaker KEYS matter for parsing the script.
-        voices, speeds = resolve_cast(args, 'kokoro')
+        voices, speeds, _pools = resolve_cast(args, 'kokoro')
         engine_id = None
     else:
         if not args.out:
@@ -1601,7 +1833,14 @@ def main():
             die(f'{args.out}: output must not end in .wav (it collides with this '
                 f'render\'s own intermediate file) -- use .mp3', 2)
         engine_id = select_engine(args.engine)
-        voices, speeds = resolve_cast(args, engine_id)
+        voices, speeds, pools = resolve_cast(args, engine_id)
+        # A blocklist is a standing preference ("never that voice"), so it lives in
+        # config; --exclude-voices adds to it for one run.
+        try:
+            args.exclude_voices = list(dict.fromkeys(
+                list(args.exclude_voices) + parse_voices_list(config.load().get('voice_blocklist'))))
+        except Exception:
+            pass
 
     lexicon_explicit = args.lexicon is not None
     lexicon_path = args.lexicon if lexicon_explicit else default_lexicon_path(args.script)
@@ -1643,6 +1882,13 @@ def main():
     engine = make_engine(engine_id, voices)
     sr = engine.sample_rate
     cache = args.cache or os.path.join(os.path.dirname(os.path.abspath(args.script)) or '.', '.tts-cache')
+    voices, rotation = apply_rotation(voices, pools, args, cache)
+    if rotation:
+        for slot in sorted(rotation['chosen']):
+            alts = len(rotation['pools'][slot])
+            how = ('pinned' if slot in rotation['pinned']
+                   else 'fixed' if args.no_rotate else 'rotated')
+            print(f'  {slot}: {voices[slot]} ({how}, {alts} in pool)')
     os.makedirs(cache, exist_ok=True)
     cleanup_orphan_tmp_files(cache)
 
@@ -1735,33 +1981,9 @@ def main():
         'genre': 'Podcast',
         'comment': f'Generated locally with the podcast skill ({engine.name}).',
     }
-    meta_path = os.path.splitext(args.out)[0] + '.ffmetadata'
-    with open(meta_path, 'w', encoding='utf-8') as f:
-        f.write(build_ffmetadata(tags, chapter_records, duration))
-
-    cmd = [ffmpeg_path, '-y', '-loglevel', 'error', '-i', wav, '-i', meta_path]
-    if args.cover:
-        if not os.path.exists(args.cover):
-            die(f'--cover {args.cover}: no such file', 2)
-        cmd += ['-i', args.cover]
-    cmd += ['-map_metadata', '1', '-map', '0:a']
-    if args.cover:
-        # An attached picture is a video stream to ffmpeg; copy it through and mark
-        # it as front cover art so players show it instead of trying to play it.
-        cmd += ['-map', '2:v', '-c:v', 'copy', '-disposition:v:0', 'attached_pic']
-    cmd += ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ac', '1', '-b:a', '96k',
-            '-id3v2_version', '3', '-write_id3v1', '1', args.out]
-    try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError:
-        # Distinct from "no voice engine installed" and "audio runtime incomplete"
-        # -- the engine and its Python runtime can both be fine while ffmpeg (a
-        # separate native binary, previously assumed to be on PATH) is what's
-        # missing. Named specifically so the fix is obvious rather than sending
-        # someone back down the voice-engine troubleshooting path.
-        die('ffmpeg not found — run: /podcast upgrade audio', 3)
+    encode_mp3(wav, args.out, tags, chapter_records, duration,
+               cover=args.cover, ffmpeg_path=ffmpeg_path)
     os.remove(wav)
-    os.remove(meta_path)
 
     chapters_path = os.path.splitext(args.out)[0] + '.chapters.json'
     with open(chapters_path, 'w', encoding='utf-8') as f:

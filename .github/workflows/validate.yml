@@ -15,7 +15,7 @@ jobs:
       - name: Script selftests (no third-party packages installed)
         run: |
           cd plugins/podcast/skills/podcast/scripts
-          for s in config.py render.py qa.py rawfetch.py deliver.py; do
+          for s in config.py render.py qa.py rawfetch.py deliver.py audition.py; do
             echo "=== $s"; python3 "$s" --selftest
           done
 

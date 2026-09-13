@@ -36,6 +36,20 @@ Write the persona sections as instructions to the script writer, not as decorati
 - **Match the cast to the angle.** A flippant cast on top of `company-diligence` produces something nobody
   would forward to an investor. Each cast lists the angles it suits.
 
+## When no shipped cast fits
+
+The three casts cover most episodes, but the voice a topic wants is sometimes not one of them — a sleep story
+wants the soft, slow voice that would ruin a debate; a documentary wants 87 Hz gravitas. **`VOICES.md` is the
+reference for that**: all 54 voices with measured pitch, pace and level, and a "picking for a job" table.
+
+Override without leaving the cast: keep its speaker labels and swap the voice.
+
+```bash
+python3 SCRIPTS/render.py script.txt out.mp3 --cast casts/solo.md --voices NARRATOR=af_nicole
+```
+
+Write a new cast file only when the *roles* change, not when only the voices do.
+
 ## Writing a new cast
 
 - **Make the voices unmistakable.** Listeners identify a speaker in the first syllable or they lose the thread.

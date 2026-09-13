@@ -7,10 +7,21 @@ simply a dislike of the two-host format.
 ## Voices
 
 ```cast
-NARRATOR = af_bella @ 1.0
+NARRATOR = af_bella, bm_george, am_echo @ 1.0
 ```
 
-## NARRATOR — the briefer
+Three narrators in rotation — a warm American woman, an unhurried British man, a
+deep American man. All three hold up over a long single-voice briefing.
+
+## Opening
+
+Vera names herself and lays out the shape of the briefing before starting, because there is no second voice to
+mark the structure. The name is fixed across episodes.
+
+> **NARRATOR:** I'm Vera. In the next twelve minutes: what <topic> actually is, the three numbers that matter,
+> and the one thing most coverage gets wrong.
+
+## NARRATOR — Vera, the briefer
 One voice, direct address, second person where it helps ("you'll want to know…"). Structured out loud, because
 there is no co-host to mark the transitions: name each section as it starts, and say what is coming next
 before a hard turn. Precise about uncertainty — with no one to push back, the narrator does it themselves:

@@ -55,6 +55,7 @@ These phrases still work if someone wants to drive it manually:
 |---|---|
 | `upgrade audio` | `bash SCRIPTS/setup.sh install audio` — ffmpeg plus the kokoro voice |
 | `upgrade voice` | `bash SCRIPTS/setup.sh install voice-kokoro` (~521 MB, best quality — the default) or `voice-piper` (~375 MB, faster, noticeably thinner) |
+| "what do the voices sound like" | `python3 SCRIPTS/audition.py out.mp3 --grep af_,am_,bf_,bm_` — every English voice reads the same line, with measured pitch/pace/level in a JSON beside it. See `casts/VOICES.md` |
 | `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (~575 MB); `qa-small` and `qa-medium` are larger and more accurate |
 | `stop installing things` | `python3 SCRIPTS/config.py set auto_setup=never` |
 | `configure telegram` | Needs `~/.config/telegram-send/bots.json`; then `python3 SCRIPTS/config.py set telegram_bot=<name>` |
@@ -75,6 +76,18 @@ After any install, **continue where you left off** — if a script exists, rende
   `debate` requires `panel`; `solo` when the listener wants a briefing rather than a conversation. **One cast per
   episode, start to finish** — a listener is still learning the voices, and swapping mid-episode loses them.
   Across episodes, including inside a series, the cast is free to change.
+- **Rotation:** a cast slot lists several interchangeable voices and the renderer picks one per episode,
+  least-recently-used first, so a weekly series doesn't sound identical every time. The choice is pinned in the
+  episode's cache, so re-rendering after a script fix keeps the same voices. Report which voices were picked in
+  one line. `--no-rotate` freezes every slot to its default.
+- **"I don't like that voice":** add it to the blocklist and it leaves every cast's rotation for good —
+  `python3 SCRIPTS/config.py set voice_blocklist=af_nova,am_santa` (comma-separated, additive: read the current
+  value first and append rather than overwrite). `--exclude-voices` does the same for one render. Offer this
+  whenever someone comments on a voice.
+- **Voice:** the cast sets one, and that is usually right. When the topic implies a different character than
+  the cast's default — a sleep story, a meditation, documentary gravitas — read `casts/VOICES.md` (all 54
+  voices, measured pitch/pace/level, and what each suits) and override with `--voices SPEAKER=<id>`, keeping
+  the cast's labels. Say in one line which voice you picked and why.
 - **Depth:** quick = 3 research agents, ~8 verified claims, ~10 min. standard (default) = 5 agents, ~20 claims,
   ~20 min. deep = standard plus an adversarial reviewer, ~25 min.
 - **`--personal`:** only with this flag may you read the user's mail or calendar, only for this episode, and record
@@ -112,6 +125,10 @@ re-check before a deadline.
 ## 4. Script
 `script.txt`: speaker lines, `---` for a segment break, `[pause N]` for silence, `#` comments, and chapter headers
 like `# ── 3. The bit about money ─────` which become chapter markers **inside the MP3**.
+- **Open with introductions.** The cast file has an `## Opening` section — follow it. The hosts say who they
+  are by name, what the episode is about, and (on a panel) who is arguing which side. The names are fixed per
+  cast and never reinvented per episode: a listener who comes back meets the same people. Keep it under twenty
+  seconds and never fake an audience ("welcome back", "as always").
 - **Speaker labels are the chosen cast's, exactly** — `MAYA:`/`ALEX:` for two-host, `HOST:`/`ADVOCATE:`/`SKEPTIC:`
   for panel, `NARRATOR:` for solo. A label the cast doesn't declare fails the render with its line number.
 - Read the cast file and write each speaker as the person it describes — vocabulary, sentence length, what they

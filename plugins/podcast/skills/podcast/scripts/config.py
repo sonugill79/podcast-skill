@@ -53,6 +53,10 @@ DEFAULTS = {
     # Which cast (casts/<name>.md) an episode uses when the request doesn't name one.
     # The `debate` angle overrides it with `panel`, which is the cast it is written for.
     "default_cast": "two-host",
+    # Voice ids the listener never wants to hear again, comma-separated. Dropped from
+    # every cast's rotation pool. "I don't like that voice" is a standing preference,
+    # not a per-episode flag, and it should hold across every cast.
+    "voice_blocklist": "",
     # always: install whatever's missing (ffmpeg, then voice, then qa) in the
     # background the moment an episode needs it -- no prompt, nothing to ask for.
     # audio-only: same, but skip the qa model (ffmpeg + voice only).
@@ -71,6 +75,7 @@ ENV_OVERRIDES = {
     "PODCAST_TELEGRAM_BOT": "telegram_bot",
     "PODCAST_LISTENER_PROFILE": "listener_profile",
     "PODCAST_DEFAULT_CAST": "default_cast",
+    "PODCAST_VOICE_BLOCKLIST": "voice_blocklist",
     "PODCAST_AUTO_SETUP": "auto_setup",
 }
 
