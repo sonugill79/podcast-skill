@@ -560,7 +560,7 @@ PYEOF
     # ~110 chars observed working) -- looks like a fixed-size buffer in the
     # underlying espeak-ng .so, not anything this script controls. It fails with
     # exactly this message: a hardcoded CI path ending in .../espeak-ng-data/phontab.
-    if grep -q "espeak-ng-data" "$smoke_err" 2>/dev/null; then
+    if grep -qE "espeak-ng-data|phontab" "$smoke_err" 2>/dev/null; then
       echo "This looks like a known kokoro-onnx/espeak-ng issue where a very long" >&2
       echo "install path (this one: $STATE_DIR, ${#STATE_DIR} chars) makes it silently" >&2
       echo "fall back to a nonexistent build-time default data path instead of its own." >&2

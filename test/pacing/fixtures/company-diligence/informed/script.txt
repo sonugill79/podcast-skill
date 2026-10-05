@@ -1,0 +1,51 @@
+# FICTIONAL eval fixture: company-diligence, level informed, cast two-host. Facts trace to ../sources.md.
+# ── 1. Can you lean on Lantern for three years? ─────
+MAYA: I'm Maya, this is Alex, and today we're looking at Lantern Robotics. Specifically, whether a warehouse can depend on them for three years. This isn't investment advice.
+ALEX: And I'm the one asking the questions today.
+---
+# ── 2. The numbers, and the one that misleads ─────
+MAYA: Here's what's at stake. Sign a three-year contract, and you need Lantern to still be standing in year three.
+ALEX: So that's the question. Will they be around?
+MAYA: Hold on to that. First, a smaller one. Revenue last year was forty-eight million dollars. Gross margin was thirty-eight percent, up from twenty-nine two years earlier.
+[pause 1.2]
+ALEX: Okay. So they keep more of each dollar than they used to?
+MAYA: Right. Now a guess. The headline says they lost five million. Is that the real loss?
+ALEX: I'd guess yes. It's the headline.
+MAYA: It isn't. That five includes a one-time gain of six million, from selling a test site. Before that gain, the operating loss was eleven million.
+ALEX: Wait. [pause 0.7] Eleven? Not five?
+MAYA: Eleven. More than double the headline, by our arithmetic. It's like a family that sold a car this year. The bank balance looks better. The monthly bills haven't changed. Where that picture breaks: the family knows the car is gone. A headline reader may not know about the site.
+ALEX: Okay. And how much cash is left?
+MAYA: Twenty-two million, at the end of the year.
+[pause 1.2]
+ALEX: Let me try it back. The margins are getting better. But they lose about eleven million a year. So how long does twenty-two million last?
+MAYA: Roughly two years, at last year's rate. That's arithmetic, not a forecast. So, your question. The cash covers two of your three years. Year three depends on what changes.
+MAYA: The line to keep. The headline loss is five. The real one is eleven.
+[pause 2]
+---
+# ── 3. One customer, nine renewals ─────
+MAYA: Now the risk I think a partner actually lives with. Who pays the bills?
+ALEX: Go on. I don't know who their customers are.
+MAYA: Forty-one percent of last year's revenue came from one customer, Northfield Foods.
+ALEX: Forty-one. [pause 0.7] One customer.
+MAYA: One customer. Their contract runs to the end of twenty twenty-seven.
+[pause 1.2]
+MAYA: And here's the chief executive, Helen Brooks, in the annual report. Quote. "We would rather grow slowly than grow on one customer."
+[pause 1.5]
+ALEX: Huh. That's not quite where they are today.
+MAYA: Not by these numbers. Picture ten dollars of Lantern's revenue last year. About four of them came from Northfield.
+[pause 1.2]
+MAYA: One more number. Nine customer contracts came up for renewal in the last two years. All nine renewed.
+ALEX: Nine of nine.
+[pause 2.5]
+MAYA: My read? That's a lot riding on one relationship, for anyone signing for three years.
+ALEX: I see it differently. Nine out of nine renewed. I think that says sticky, not fragile.
+MAYA: I'd say sticky, until the big one leaves.
+ALEX: Maybe. But nothing you've told me says it's leaving.
+MAYA: Fair. We won't settle it today. So the line to keep is this. Forty-one percent from one customer last year. And their contract ends with twenty twenty-seven.
+---
+# ── 4. What we couldn't verify ─────
+ALEX: Before we go. What couldn't we pin down?
+MAYA: Two things. A trade newsletter reported that Northfield is trialling a rival's robots. We couldn't verify it. If you're signing, ask them.
+ALEX: Okay. And the second?
+MAYA: A co-founder said in an interview that a new funding round is coming. That's an interested party, and we couldn't confirm it.
+MAYA: So, three things to remember. The real loss is eleven million, not five. Forty-one percent came from one customer last year. And nine out of nine renewed.

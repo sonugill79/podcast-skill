@@ -1,0 +1,56 @@
+# FICTIONAL eval fixture: company-diligence, level intro, cast two-host. Facts trace to ../sources.md.
+# ── 1. Can you lean on Lantern for three years? ─────
+MAYA: I'm Maya, this is Alex, and today we're looking at Lantern Robotics. Specifically, whether a warehouse can depend on them for three years. This isn't investment advice.
+ALEX: And I'm the one asking the questions today.
+---
+# ── 2. The numbers, and the one that misleads ─────
+MAYA: Here's what's at stake. Sign a three-year deal, and you need Lantern to still be in business in year three.
+ALEX: So that's the question. Will they still be around?
+MAYA: Hold on to that. First, a smaller one. When a warehouse signs with Lantern, what do you think it gets?
+ALEX: It buys the robots?
+MAYA: That's the common guess. It rents them, by the month. Lantern owns the robots and fixes them. The robots move whole shelves around the warehouse.
+[pause 1.2]
+MAYA: Now the money. Revenue is all the money customers paid in a year. Last year that was forty-eight million dollars.
+ALEX: And how much of that do they keep?
+MAYA: Gross margin answers that. It's what's left of each dollar after the robots' own costs, like servicing and wear. It was thirty-eight cents of every dollar. Two years earlier it was twenty-nine.
+[pause 1.2]
+MAYA: Next. The headline says they lost five million dollars. But that year they also sold a test site, once, for a gain of six million. It happened once. That's called a one-time gain.
+ALEX: So the everyday loss... is bigger?
+MAYA: Yes. Without that sale, the operating loss, the loss from simply running the business, was eleven million.
+ALEX: Wait. [pause 0.7] Eleven? Not five?
+MAYA: Eleven. More than double the headline, by our arithmetic. It's like a family that sold a car this year. The bank balance looks better. The monthly bills haven't changed. Where that picture breaks: the family knows the car is gone. Someone reading the headline may not know about the site.
+ALEX: Okay. And how much money is left in the bank?
+MAYA: Twenty-two million dollars, at the end of the year.
+[pause 1.2]
+ALEX: Let me try it back. They keep more of each dollar than before. But running the business loses about eleven million a year. So how long does the money in the bank last?
+MAYA: About two years, at last year's rate. That's arithmetic, not a forecast. So, your question. The cash covers two of your three years. Year three depends on what changes.
+MAYA: So, in one line. The headline loss is five million. The real one is eleven.
+[pause 2]
+---
+# ── 3. One customer, nine renewals ─────
+MAYA: Now the risk I think you'd actually live with. Who pays the bills at Lantern?
+ALEX: Go on. I don't know who their customers are.
+MAYA: Forty-one percent of last year's revenue came from one customer, called Northfield Foods.
+ALEX: Forty-one. [pause 0.7] One customer.
+MAYA: One customer. Their contract runs to the end of twenty twenty-seven.
+[pause 1.2]
+MAYA: Here's what the boss, the chief executive Helen Brooks, wrote in the company's yearly report. Quote. "We would rather grow slowly than grow on one customer."
+[pause 1.5]
+ALEX: Huh. That's not quite where they are today.
+MAYA: Not by these numbers. Picture ten dollars of last year's revenue at Lantern. About four of them came from Northfield.
+[pause 1.2]
+MAYA: One more number. A renewal is when a contract ends and the customer signs again. Nine contracts came up for renewal in the last two years. All nine signed again.
+ALEX: Nine of nine.
+[pause 2.5]
+MAYA: My read? That's a lot riding on one relationship, if you're signing for three years.
+ALEX: I see it differently. Nine out of nine signed again. I think that says they like the product.
+MAYA: I'd say they like it, until the big one leaves.
+ALEX: Maybe. But nothing you've told me says it's leaving.
+MAYA: Fair. We won't settle it today. So, the recap. Four dollars in ten came from Northfield last year. And their contract ends with twenty twenty-seven.
+---
+# ── 4. What we couldn't verify ─────
+ALEX: Before we go. What couldn't we pin down?
+MAYA: Two things. A trade newsletter reported that Northfield is trialling a rival's robots. We couldn't verify it. If you're signing, ask them.
+ALEX: Okay. And the second?
+MAYA: A co-founder said in an interview that a new funding round is coming. That means raising new money from investors. That's someone with a stake in it, and we couldn't confirm it.
+MAYA: So, three things to remember. The real loss is eleven million, not five. Four dollars in ten came from one customer last year. And nine out of nine customers signed again.

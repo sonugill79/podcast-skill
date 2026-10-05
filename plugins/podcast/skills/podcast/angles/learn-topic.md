@@ -6,8 +6,9 @@ scientific question.
 touches their world, and where to go deeper.
 
 ## Brief (ask only if missing)
-- The topic, and the starting level (new to it / knows the basics / practitioner wanting the frontier). Default: smart
-  generalist, technical background.
+- The topic. The starting level is `--level` (`brief.md` `level:`): new to it = `intro`, knows the basics =
+  `informed` (the default: a smart generalist with a technical background), practitioner wanting the frontier =
+  `expert`. Ask only if the request says neither and the config default plainly doesn't fit.
 - Why now: a decision, a project, or curiosity. This shapes the "how it touches your world" segment.
 
 ## Research areas (one agent each)
@@ -32,6 +33,17 @@ touches their world, and where to go deeper.
 8. How to go deeper: three resources and one thing to try this week (8%)
 9. Wrap: three things to remember, what couldn't be verified (5%)
 
+## Level notes
+`brief.md` `level:` sets the pitch (SKILL.md §Invocation).
+
+| Level | Assumes | Explain or add | Skip or shorten |
+|---|---|---|---|
+| intro | everyday knowledge only | Every term in plain words the first time it is said; one image per concept, and where it breaks; each segment's line to remember (SKILL.md §4) is a one-sentence recap. The puzzle is the everyday one ("Why does…?") | The frontier (segment 5) shrinks to the one development that matters; history keeps only the turning points the model needs; no names or jargon the listener won't use again |
+| informed (default) | the basics; a technical generalist | New or contested terms only | Nothing: the outline as written |
+| expert | the field's vocabulary and textbook model | The precise mechanism and its limits, current numbers, the open questions and where experts disagree, in detail. The puzzle is an edge case; the wrong guess is a practitioner's misconception | Segments 2–4 compress to a framing ("you know the textbook version; here's where it breaks"). No definitions of standard terms, no analogy-first build |
+
+Level never changes verification: the must-verify list below, SKILL.md §3 and `sources.md` tracing are the same at every level, and so is saying what couldn't be verified. Where SKILL.md §4's lesson shape applies, it holds at every level: the level changes what the learner's puzzle and wrong guess are, never whether the guess comes from `sources.md`.
+
 ## Must verify yourself
 - Definitions and any "X is Y" claim the model is built on.
 - Dates, statistics, "first/largest/fastest" claims.
@@ -41,4 +53,4 @@ touches their world, and where to go deeper.
 ## Don'ts
 - No false balance on settled questions. Say plainly which side the evidence supports.
 - No invented examples presented as real. Label hypotheticals as hypothetical.
-- Don't pad with history if the listener asked about the frontier. Rebalance the outline to their level.
+- Don't pad with history if the listener asked about the frontier. Rebalance the outline to their level (Level notes above).

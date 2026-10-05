@@ -27,6 +27,11 @@ Kokoro has no emotion or prosody control — there is no "excited" setting. A ca
 The third one carries most of the perceived personality, and it is the reason a cast file is mostly prose.
 Write the persona sections as instructions to the script writer, not as decoration.
 
+Two things are deliberately **not** cast settings. The silence between lines is `--pacing`
+(`brisk`, `relaxed` (the default) or `spacious`), the same for every cast. And emotion has to be written in words:
+Kokoro spells "mm-hm" out letter by letter, so reactions are words ("Wait.", "Okay.") and each cast's
+`## Reactions` lists the ones that render well.
+
 ## Choosing a cast
 
 - **One cast per episode.** Mixing casts inside an episode is confusing — a listener is still learning the
@@ -54,7 +59,11 @@ Write a new cast file only when the *roles* change, not when only the voices do.
 
 - **Make the voices unmistakable.** Listeners identify a speaker in the first syllable or they lose the thread.
   Vary accent and register, not just name — two American male voices in one episode is the classic mistake.
-- **Give each speaker a job**, not just a temperament: who opens, who presses, who concedes, who closes.
+- **Give each speaker a job**, not just a temperament: who opens, who presses, who concedes, who closes, and in
+  each segment who tells and who listens. On `two-host` the listener is the learner, the audience's stand-in; a
+  panel has no learner, and a solo narrator plays both parts. Say which in a `## Roles` section.
+- **Add `## Reactions` and `## Stance`**, as the shipped casts do: the felt moments that suit these voices, and
+  which positions suit each persona.
 - **Keep the roster small.** Three distinct voices is a panel; five is a crowd nobody can follow in audio.
 - **Personality never licenses sloppiness.** A contrarian host still cites verified sources. The rules in
   `SKILL.md` apply to every cast equally.

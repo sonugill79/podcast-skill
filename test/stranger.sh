@@ -32,6 +32,12 @@ python3 "$S/config.py" status > "$work/status0" 2>&1; check "config status runs"
 grep -qiE 'not installed|none' "$work/status0" && printf '  PASS banner reports missing capability\n' || { printf '  FAIL banner: %s\n' "$(head -3 "$work/status0")"; fails=$((fails+1)); }
 grep -qiE 'upgrade voice' "$work/status0" && printf '  PASS banner tells the user how to upgrade\n' || { printf '  FAIL banner has no upgrade hint\n'; fails=$((fails+1)); }
 python3 "$S/render.py" "$work/ep.txt" --dry-run >/dev/null 2>&1; check "dry-run works with no packages" "$?" "0"
+python3 "$S/config.py" status --json > "$work/status0.json" 2>/dev/null
+check "default_pacing is relaxed" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config"]["default_pacing"])' "$work/status0.json" 2>/dev/null)" "relaxed"
+check "default_level is informed" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config"]["default_level"])' "$work/status0.json" 2>/dev/null)" "informed"
+pfx="$here/pacing/fixtures/learn-topic/informed"
+python3 "$S/render.py" "$pfx/script.txt" --dry-run --strict --cast "$S/../casts/two-host.md" --voices MAYA=af_heart,ALEX=am_michael --pacing relaxed >/dev/null 2>&1
+check "pacing check passes (--dry-run --strict, relaxed)" "$?" "0"
 python3 "$S/render.py" "$work/ep.txt" "$work/ep.mp3" >/dev/null 2>&1; check "render exits 3 (offer upgrade)" "$?" "3"
 python3 "$S/qa.py" "$work/ep.txt" "$work/ep.mp3" >/dev/null 2>&1; check "qa exits 3 (offer upgrade)" "$?" "3"
 
@@ -41,6 +47,8 @@ check "install voice-piper" "$rc" "0"
 grep -qiE 'MB|GB' "$work/inst1" && printf '  PASS install announced a size\n' || { printf '  FAIL install never mentioned a size\n'; fails=$((fails+1)); }
 python3 "$S/render.py" "$work/ep.txt" "$work/ep.mp3" >/dev/null 2>&1; check "render now succeeds" "$?" "0"
 [ -s "$work/ep.mp3" ] && printf '  PASS mp3 exists (%s bytes)\n' "$(wc -c < "$work/ep.mp3")" || { printf '  FAIL no mp3\n'; fails=$((fails+1)); }
+python3 "$S/render.py" "$work/ep.txt" "$work/ep-brisk.mp3" --pacing brisk >/dev/null 2>&1; check "render --pacing brisk succeeds" "$?" "0"
+[ -s "$work/ep-brisk.mp3" ] && printf '  PASS brisk mp3 exists\n' || { printf '  FAIL no brisk mp3\n'; fails=$((fails+1)); }
 [ -s "$work/ep.chapters.json" ] && printf '  PASS chapters.json written\n' || { printf '  FAIL no chapters.json\n'; fails=$((fails+1)); }
 
 say "upgrade qa"

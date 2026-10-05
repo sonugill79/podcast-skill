@@ -4,7 +4,8 @@ render.py: turn a two-host podcast script into one MP3 with a local TTS engine.
 
 Script format (plain text):
   MAYA: A line of dialogue.          speaker lines; SPEAKER must be in --voices
-  ALEX: Another line.
+  ALEX: Wait. [pause 0.8] So then?   inline pause: the line is synthesised in chunks
+                                      with N s of silence between them (0 < N <= 10)
   [pause 1.5]                        explicit silence, seconds
   ---                                segment break (longer pause)
   # ── 1. Title ──                   chapter header (box-drawing dashes around a title;
@@ -38,6 +39,13 @@ Neither existing is a silent no-op, same as today.
 
   --dry-run    parse + lexicon only, print line/word/duration estimate and chapters (no
                audio, no OUT required, no engine resolved)
+               then a pacecheck block (pacing metrics + warnings)
+  --strict     with --dry-run: exit 4 if pacecheck warns
+  --pacing P   brisk | relaxed | spacious (default: config default_pacing, "relaxed").
+               brisk is 0.2.0's timing, sample for sample: each line synthesised whole,
+               0.32 s between lines, 1.1 s at `---`. relaxed and spacious synthesise
+               each sentence on its own (cached like any chunk) with a short gap between
+               sentences of one speaker and a longer one when the speaker changes; see GAPS.
   --selftest   offline parser/lexicon/estimate/engine-selection checks, prints
                PASS/FAIL per check, exits 0/1
 """
@@ -51,14 +59,44 @@ except ImportError:
 ORPHAN_TMP_RE = re.compile(r'^(?P<name>.+)\.tmp-(?P<pid>\d+)$')
 ORPHAN_TMP_MAX_AGE = 3600  # seconds
 
-TURN_GAP, SEGMENT_GAP = 0.32, 1.1
-# Speech-only words/minute, derived from a measured production episode: 3,131
-# spoken words over a measured 1230.0 s render, minus the 41.7 s of turn/segment/
-# pause gaps this parser computes for that script -> 3131 words / 1188.3 s of
-# actual speech = ~158.1 wpm. (The old constant, 153, had already baked the gaps in
-# once, then the dry-run estimate added them again -- 21.2 min vs a measured 20.5.)
-# Re-derive this constant if TURN_GAP/SEGMENT_GAP change materially.
-WPM = 158
+# Silences, in seconds, by pacing and kind. The kinds name what came before the gap:
+#   sentence  between two sentences of one say line (relaxed/spacious split lines into sentences)
+#   continue  between two lines by the same speaker
+#   handoff / question / reaction / dense   the speaker changes (most specific kind wins:
+#             the line just said ends in "?", carries >= 2 figures, or is <= 5 words)
+#   segment   a `---` divider
+# A whole-line `[pause N]` replaces the gap (no gap is added next to it) and an inline
+# `[pause N]` is exactly N. brisk is 0.2.0 (one 0.32 s gap everywhere, no sentence split) and
+# must stay audio-identical to it. relaxed reproduces the owner-approved ear test (v6):
+# 0.32 s within a speaker, 0.7 s at a speaker change. spacious is relaxed x 1.3 at a speaker
+# change. Several kinds may share a value; the kinds exist so the values can be tuned apart.
+# Gaps are not in the TTS cache key, so changing these never re-synthesises anything.
+GAPS = {
+    'brisk':    {'continue': 0.32, 'sentence': 0.32, 'handoff': 0.32, 'reaction': 0.32,
+                 'question': 0.32, 'dense': 0.32, 'segment': 1.1},
+    'relaxed':  {'continue': 0.32, 'sentence': 0.32, 'handoff': 0.7, 'reaction': 0.7,
+                 'question': 0.7, 'dense': 0.7, 'segment': 2.0},
+    'spacious': {'continue': 0.45, 'sentence': 0.45, 'handoff': 0.91, 'reaction': 0.91,
+                 'question': 0.91, 'dense': 0.91, 'segment': 2.6},
+}
+PACINGS = tuple(GAPS)
+GAP_KINDS = ('continue', 'sentence', 'handoff', 'reaction', 'question', 'dense', 'segment')
+# 0.2.0's two constants, kept as names for brisk.
+TURN_GAP, SEGMENT_GAP = GAPS['brisk']['continue'], GAPS['brisk']['segment']
+# Speech-time model, fitted to measured renders (ffprobe) of two-host kokoro audio: speech =
+# words / WPM * 60 + CHUNK_OVERHEAD per synthesised chunk (a chunk = the text between gaps: one
+# line in brisk, one sentence in relaxed/spacious). Gaps are NOT in it; they are added from GAPS.
+# Fit (least squares, 14 renders: 4 scripts of 375-1710 words x brisk/relaxed/spacious, plus two
+# short ones): ~159 wpm and -0.40 s per chunk, since a chunk's leading and trailing silence is
+# trimmed, so short chunks run quicker than a flat rate says. Rounded to the pair that keeps the
+# worst relaxed error lowest: 163 wpm, -0.35 s -> relaxed within 3.7%, brisk within 5.4%. One flat
+# rate cannot do it: full-length scripts measure ~175 wpm net of gaps and short-sentence rescripts
+# ~197, and the chunk term is what reconciles them. (The old flat 158 came from a brisk render by
+# an older private renderer; on today's engine it over-estimated by 7-21%.) Re-fit if GAPS, the
+# trim constants or the voice engine change materially.
+WPM = 163
+CHUNK_OVERHEAD = -0.35
+MIN_CHUNK_SECONDS = 0.3   # floor so a one-word chunk ("Huh.") never estimates to ~0
 
 KOKORO_REPO_ID = 'hexgrad/Kokoro-82M'
 TRIM_THRESHOLD_DB = -45
@@ -518,14 +556,23 @@ def cache_key(engine_id, voice, sample_rate, speed, spoken_text):
         .encode()).hexdigest()[:16]
 
 
-def parse_script(path, voices, pattern, rules):
+def parse_script(path, voices, pattern, rules, pacing='brisk'):
     """Returns (events, chapters) where events is a list of
-    ('say', speaker, written_text, spoken_text) | ('pause', seconds)
+    ('say', speaker, written_text, spoken_text[, segments]) | ('pause', seconds)
     and chapters is a list of (title, event_index) — event_index is the index in
-    `events` of the next say/pause after the header, i.e. where the chapter starts."""
+    `events` of the next say/pause after the header, i.e. where the chapter starts.
+    Under a pacing that splits sentences (not brisk), a say line of two or more
+    sentences carries segments with a ('gap', 'sentence') between them (split_turn()).
+    Bad input (missing file, unknown speaker, malformed pause) exits 2 naming the line."""
     events = []
     chapters = []
-    for n, raw in enumerate(open(path, encoding='utf-8'), 1):
+    split = splits_sentences(pacing)
+    try:
+        with open(path, encoding='utf-8') as f:
+            raw_lines = f.readlines()
+    except OSError as e:
+        die(f'{path}: cannot read script: {e.strerror or e}', 2)
+    for n, raw in enumerate(raw_lines, 1):
         line = raw.strip()
         if not line:
             continue
@@ -537,40 +584,516 @@ def parse_script(path, voices, pattern, rules):
                     chapters.append((title, len(events)))
             continue
         if line == '---':
-            events.append(('pause', SEGMENT_GAP))
+            events.append(('pause', SegmentBreak(SEGMENT_GAP)))
             continue
-        if m := re.fullmatch(r'\[pause ([\d.]+)\]', line):
+        if m := re.fullmatch(r'\[pause ([\d.]+)\]', line, re.ASCII):
             try:
                 secs = float(m.group(1))
             except ValueError:
-                sys.exit(f'{path}:{n}: invalid pause duration: {line[:60]}')
+                die(f'{path}:{n}: invalid pause duration: {line[:60]}', 2)
             events.append(('pause', secs))
             continue
         m = re.fullmatch(r'([A-Z]+):\s*(.+)', line)
         if not m or m.group(1) not in voices:
-            sys.exit(f'{path}:{n}: not a known speaker line: {line[:60]}')
+            die(f'{path}:{n}: not a known speaker line: {line[:60]}', 2)
         written = m.group(2)
-        spoken = apply_lexicon(written, pattern, rules)
-        events.append(('say', m.group(1), written, spoken))
+        segments = split_inline_pauses(path, n, written)  # also validates every token
+        # Never cut inside a lexicon match, so a rule spanning ". " still applies whole.
+        protect = [mm.span() for mm in pattern.finditer(written)] if pattern else []
+        pieces = split_turn(written, protect) if split else [written]
+        if len(pieces) > 1:
+            # One chunk per sentence, a sentence gap between them; an inline pause inside
+            # a sentence splits it further, exactly as on a one-sentence line.
+            segs = []
+            for j, piece in enumerate(pieces):
+                if j:
+                    segs.append(('gap', 'sentence'))
+                inner = split_inline_pauses(path, n, piece)
+                if inner is None:
+                    segs.append(('text', apply_lexicon(piece, pattern, rules)))
+                else:
+                    segs.extend((kind, apply_lexicon(val, pattern, rules) if kind == 'text' else val)
+                                for kind, val in inner)
+            segs = tuple(segs)
+            spoken = ' '.join(val for kind, val in segs if kind == 'text')
+            events.append(('say', m.group(1), written, spoken, segs))
+            continue
+        if segments is None:
+            spoken = apply_lexicon(written, pattern, rules)
+            events.append(('say', m.group(1), written, spoken))
+            continue
+        # Inline pause: a 5th element carries the line as spoken chunks and silences,
+        # the lexicon applied per chunk. A line without one stays a 4-tuple, so it is
+        # rendered exactly as before.
+        segments = tuple((kind, apply_lexicon(val, pattern, rules) if kind == 'text' else val)
+                         for kind, val in segments)
+        spoken = ' '.join(val for kind, val in segments if kind == 'text')
+        events.append(('say', m.group(1), written, spoken, segments))
     return events, chapters
 
 
-def estimate_seconds(events):
-    """Returns (total_seconds, chapter_start_seconds_by_event_index)."""
-    t = 0.0
-    starts = {}
+def split_inline_pauses(path, n, written):
+    """None when the line has no inline pause token; else the line's segments,
+    [('text', chunk) | ('pause', seconds), ...]. The syntax lives in config.py so
+    qa.py strips exactly what this renders. A malformed token exits 2 naming the line.
+    Without config.py (a bare checkout) there is no inline-pause syntax: the line is
+    rendered as before."""
+    if config is None or not config.PAUSE_TOKEN_RE.search(written):
+        return None
+    try:
+        return config.split_inline_pauses(written)
+    except ValueError as e:
+        die(f'{path}:{n}: {e}: {written[:60]}', 2)
+
+
+def splits_sentences(pacing):
+    """Whether a pacing synthesises each sentence of a line on its own. brisk never does:
+    it must reproduce 0.2.0, which synthesised whole lines."""
+    return pacing != 'brisk'
+
+
+def split_turn(written, protect=()):
+    """A say line's written text -> its sentences, as rendered under relaxed/spacious.
+    Cuts only where sentence_breaks() finds a sentence end, never inside a `protect` span
+    (the lexicon's matches, so a rule like "U.S. Navy" is applied whole). A one-word
+    sentence ("Okay.", "Wait.", "Honestly?") is joined to the one after it, since a lone
+    word fails QA as DROPPED; "No." is the exception, an answer that stands on its own.
+    A one-word LAST sentence is joined to the one before it ("It works. Okay.").
+    Pieces are slices of `written`, so their text is exactly what was written."""
+    cuts = [(e, b) for e, b in sentence_breaks(written)
+            if not any(a < b and e < z for a, z in protect)]
+    pieces, prev = [], 0
+    for e, b in cuts:
+        pieces.append((prev, e, b))  # (start, end of sentence, start of the next)
+        prev = b
+    bounds = [(start, e) for start, e, _ in pieces] + [(prev, len(written))]
+    merged = []  # [start, end] slices
+    for a, z in bounds:
+        if merged:
+            last = written[merged[-1][0]:merged[-1][1]]
+            if len(last.split()) == 1 and last != 'No.':
+                merged[-1][1] = z
+                continue
+        merged.append([a, z])
+    if len(merged) > 1 and len(written[merged[-1][0]:merged[-1][1]].split()) == 1:
+        tail = merged.pop()
+        merged[-1][1] = tail[1]
+    return [written[a:z] for a, z in merged]
+
+
+def line_segments(ev):
+    """A say event's segments, [('text', spoken) | ('pause', seconds) | ('gap', kind), ...].
+    The one reader of the optional 5th element: a line without an inline pause or a
+    sentence split is one chunk. A 'gap' is a GAPS kind, resolved per pacing."""
+    return ev[4] if len(ev) > 4 else (('text', ev[3]),)
+
+
+def gap_kind(prev, nxt):
+    """The GAPS kind of the silence after say event `prev` when say event `nxt` follows.
+    Same speaker: 'continue'. A speaker change: the most specific of 'question' (prev's last
+    sentence is a question), 'dense' (>= 2 figures), 'reaction' (<= 5 words), else 'handoff'."""
+    if nxt[1] == prev[1]:
+        return 'continue'
+    text = prev[3]
+    last = (split_sentences(text) or [text])[-1]
+    if re.search(r'\?["\'\u201d\u2019)\]]*$', last.rstrip()):
+        return 'question'
+    if len(FIGURE_RE.findall(text)) >= 2:
+        return 'dense'
+    if len(text.split()) <= 5:
+        return 'reaction'
+    return 'handoff'
+
+
+def gap_for(prev, nxt, pacing):
+    """Seconds of silence after say event `prev` when say event `nxt` follows."""
+    return GAPS[pacing][gap_kind(prev, nxt)]
+
+
+def _timeline(events, duration_of, pacing, on_line=None):
+    """(ops, starts): ops as plan_assembly() returns them, and starts[i] the time event i
+    begins (starts[len(events)] is the end). The one place gaps are applied."""
+    g = GAPS[pacing]
+    ops, starts, t = [], [], 0.0
     for i, ev in enumerate(events):
-        starts[i] = t
+        starts.append(t)
         if ev[0] == 'pause':
-            t += ev[1]
+            secs = g['segment'] if isinstance(ev[1], SegmentBreak) else ev[1]
+            ops.append(('silence', secs))
+            t += secs
             continue
-        words = len(ev[3].split())
-        t += words / WPM * 60.0
+        for kind, val in line_segments(ev):
+            if kind == 'text':
+                ops.append(('say', ev[1], val))
+                t += duration_of(ev[1], val)
+            else:
+                secs = val if kind == 'pause' else g[val]
+                ops.append(('silence', secs))
+                t += secs
+        if on_line:
+            on_line()
         nxt = events[i + 1] if i + 1 < len(events) else None
         if nxt and nxt[0] == 'say':
-            t += TURN_GAP
-    starts[len(events)] = t
-    return t, starts
+            secs = gap_for(ev, nxt, pacing)
+            ops.append(('silence', secs))
+            t += secs
+    starts.append(t)
+    return ops, starts
+
+
+def plan_assembly(events, chapters, duration_of, on_line=None, pacing='brisk'):
+    """The render's timeline, engine-free. Returns (ops, chapter_records): ops are
+    ('say', speaker, spoken_text) | ('silence', seconds) in playback order, and each
+    chapter record is {'title', 'start'}. duration_of(speaker, text) gives a chunk's
+    length in seconds (main() synthesises it there); on_line() fires after each line.
+    Gaps come from GAPS[pacing]; the events must be parsed under the same pacing."""
+    ops, starts = _timeline(events, duration_of, pacing, on_line)
+    records = [{'title': title, 'start': starts[min(idx, len(events))]} for title, idx in chapters]
+    return ops, records
+
+
+class Episode:
+    """A script parsed under one pacing: the one path from text to timeline that --dry-run
+    (estimate, pacecheck) and the render (plan) both take, so the pacing is applied the
+    same way everywhere and cannot be dropped at a call site."""
+
+    def __init__(self, path, voices, pattern, rules, pacing):
+        self.pacing = pacing
+        self.events, self.chapters = parse_script(path, voices, pattern, rules, pacing)
+
+    def estimate(self):
+        return estimate_seconds(self.events, self.pacing)
+
+    def pacecheck(self):
+        return pacecheck(self.events, self.chapters, pacing=self.pacing)
+
+    def plan(self, duration_of, on_line=None):
+        return plan_assembly(self.events, self.chapters, duration_of, on_line, pacing=self.pacing)
+
+
+def estimate_seconds(events, pacing='brisk'):
+    """Returns (total_seconds, chapter_start_seconds_by_event_index): plan_assembly()'s
+    timeline with speech timed at WPM, so the estimate and the render share every gap."""
+    _ops, starts = _timeline(events, lambda _speaker, text: speech_seconds(text), pacing)
+    return starts[-1], dict(enumerate(starts))
+
+
+# ---------------------------------------------------------------------------
+# pacecheck: a deterministic, offline pacing report printed by --dry-run.
+# Targets come from the PRD (Goals > Quantitative Metrics). The warning kinds and the
+# printed line prefixes ("pacecheck  ", "  pauses ", "  seg ", "  ⚠ KIND: ") are a
+# contract read by the model, CI and the eval runner; the thresholds are tunable.
+# ---------------------------------------------------------------------------
+PACE_KINDS = ('NO_PAUSE', 'LONG_RUN', 'FLAT_LINES', 'TELLER_CHANGED', 'NONLEXICAL_ALONE', 'NONLEXICAL_MANY',
+              'BANNED_SOUND')
+PAUSE_EVERY_SECS = 90.0       # at least one pause per this many seconds of script
+MAX_PAUSE_FREE_SECS = 180.0   # no stretch inside a segment longer than this without a pause
+LONG_RUN_WORDS = 90           # longest single-speaker run (skipped for a one-voice script)
+SHORT_SENTENCE_WORDS = 6      # a "short" sentence, for the FLAT_LINES share
+# Share of SENTENCES (not lines) of <= SHORT_SENTENCE_WORDS words that counts as varied.
+# The orchestrator sets this band; see the 2.1 report for the measured scripts.
+FLAT_LINES_BAND = (0.40, 0.70)
+FLAT_LINES_MIN_SENTENCES = 20  # below this many sentences (per segment / episode) the share isn't judged
+LISTENER_LINE_WORDS = 5       # role heuristic: a turn this short counts toward "listener"
+NONLEXICAL_PER_SEGMENT = 1    # allowlisted sounds per segment
+STRICT_EXIT = 4               # --dry-run --strict with any warning (3 means "not installed")
+
+FIGURE_RE = re.compile(r'\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|hundred|thousand|million|'
+                       r'billion|percent|\d[\d,.]*)\b', re.I)
+# A sentence ends at . ! or ? (and any closing quote or bracket) followed by a space or the
+# end, but not at a "..." hold. sentence_breaks() adds the cases that are not an end.
+SENTENCE_END_RE = re.compile(r'(?:[!?]+|(?<!\.)\.(?!\.))["\'\u201d\u2019)\]]*(?:\s+|$)')
+# Titles that are followed by a name, so their full stop never ends a sentence.
+TITLE_ABBREVS = frozenset({'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'St.', 'Mt.', 'Prof.', 'vs.'})
+DOTTED_ABBREV_RE = re.compile(r'(?:[A-Za-z]\.){2,}')  # U.S., p.m., e.g., i.e.
+
+
+class SegmentBreak(float):
+    """The silence a `---` divider adds. It equals SEGMENT_GAP (brisk), so events compare
+    as before; the timeline uses GAPS[pacing]['segment'] for it, and pacecheck tells it
+    apart from a written `[pause N]`."""
+    __slots__ = ()
+
+
+def speech_seconds(text):
+    """Estimated speech time of ONE synthesised chunk of spoken text (no gaps): words at WPM
+    plus CHUNK_OVERHEAD, floored at MIN_CHUNK_SECONDS."""
+    return max(MIN_CHUNK_SECONDS, len(text.split()) / WPM * 60.0 + CHUNK_OVERHEAD)
+
+
+def sentence_breaks(text):
+    """[(end, next_start)] for each sentence end inside `text`: the one definition of a
+    sentence boundary, shared by the renderer (split_turn) and pacecheck (split_sentences).
+    Not a boundary: a "..." hold; the end of the text; a full stop after a title (Mr., Dr.)
+    or a dotted abbreviation (U.S., p.m., e.g.); a stop followed by a lowercase letter or a
+    digit ("item No. 5"); one inside an open double quote; one followed by an inline
+    [pause N] (a beat stays with the sentence it follows)."""
+    out = []
+    for m in SENTENCE_END_RE.finditer(text):
+        nxt = m.end()
+        end = len(text[:nxt].rstrip())
+        if nxt >= len(text) or end <= 0:
+            continue
+        c = text[nxt]
+        if c.islower() or c.isdigit() or text[nxt:nxt + 6].lower() == '[pause':
+            continue
+        word = text[:end].split()[-1].rstrip('"\'\u201d\u2019)]')
+        if word in TITLE_ABBREVS or DOTTED_ABBREV_RE.fullmatch(word):
+            continue
+        head = text[:end]
+        if head.count('"') % 2 or head.count('\u201c') > head.count('\u201d'):
+            continue
+        out.append((end, nxt))
+    return out
+
+
+def split_sentences(text):
+    """Spoken text -> sentences (each with at least one word), cut at sentence_breaks()."""
+    out, pos = [], 0
+    for end, nxt in sentence_breaks(text):
+        out.append(text[pos:end].strip())
+        pos = nxt
+    out.append(text[pos:].strip())
+    return [s for s in out if re.search(r'\w', s)]
+
+
+def _pace_timeline(events, chapters, pacing='brisk'):
+    """[(event_idx, kind, seconds)] with kind speech|pause|break|gap, read from
+    plan_assembly() so turn gaps are whatever the render uses. A `[pause N]` line and
+    an inline pause are 'pause'; a `---` divider is 'break'; a sentence or turn gap is
+    'gap'; '...' is just speech."""
+    ops, _ = plan_assembly(events, chapters, lambda _speaker, text: speech_seconds(text), pacing=pacing)
+    out, k = [], 0
+    for i, ev in enumerate(events):
+        if ev[0] == 'pause':
+            kinds = ['break' if isinstance(ev[1], SegmentBreak) else 'pause']
+        else:
+            kinds = [{'text': 'speech', 'pause': 'pause', 'gap': 'gap'}[kind] for kind, _ in line_segments(ev)]
+            nxt = events[i + 1] if i + 1 < len(events) else None
+            if nxt and nxt[0] == 'say':
+                kinds.append('gap')
+        for kind in kinds:
+            op = ops[k] if k < len(ops) else None
+            if op is None or (op[0] == 'say') != (kind == 'speech'):
+                raise RuntimeError('pacecheck: plan_assembly() ops no longer line up with events')
+            out.append((i, kind, speech_seconds(op[2]) if kind == 'speech' else op[1]))
+            k += 1
+    if k != len(ops):
+        raise RuntimeError('pacecheck: plan_assembly() ops no longer line up with events')
+    return out
+
+
+def _pace_segments(events, chapters):
+    """Segments split at chapter headers and `---` dividers; ones without a line are dropped."""
+    titles = {}
+    for title, idx in chapters:
+        titles.setdefault(idx, title)
+    cuts = {0, *titles}
+    cuts.update(i + 1 for i, ev in enumerate(events) if ev[0] == 'pause' and isinstance(ev[1], SegmentBreak))
+    bounds = sorted(c for c in cuts if c < len(events)) + [len(events)]
+    return [{'title': titles.get(a), 'start': a, 'end': b} for a, b in zip(bounds, bounds[1:])
+            if any(events[j][0] == 'say' for j in range(a, b))]
+
+
+# Every m-spelling of "mm-hm" ("Mm-hm", "Mhm", "Mmhmm", "Mm") is spelled out as letters by
+# Kokoro (ledger L14), so pacecheck flags it rather than counting it as a sound.
+BANNED_SOUND_RE = re.compile(r"(?<![\w'-])(m+-?h+m+|m{2,})(?![\w'-])", re.I)
+
+
+def find_sounds(text, nonlexical):
+    """-> (sounds found, as their NONLEXICAL keys; text with them blanked out). Longest key
+    first, so "uh-huh" is not also a "huh"; a repeat ("ha-ha", "ha ha") is one sound."""
+    found = []
+    for key in sorted(nonlexical, key=len, reverse=True):
+        k = re.escape(key)
+        rx = re.compile(r"(?<![\w'-])" + k + r"(?:[- ]" + k + r")*(?![\w'-])", re.I)
+        found += [key] * len(rx.findall(text))
+        text = rx.sub(' ', text)
+    return found, text
+
+
+def _written_words(ev):
+    """A say line as written, inline pause tokens removed (config.py owns that syntax)."""
+    return config.strip_inline_pauses(ev[2]) if config is not None else ev[2]
+
+
+def _spoken_text(ev):
+    return ' '.join(val for kind, val in line_segments(ev) if kind == 'text')
+
+
+def _flat_lines(sentence_words):
+    """FLAT_LINES message for a list of sentence lengths, or None (in band, or too few to judge)."""
+    if len(sentence_words) < FLAT_LINES_MIN_SENTENCES:
+        return None
+    share = sum(1 for w in sentence_words if w <= SHORT_SENTENCE_WORDS) / len(sentence_words)
+    lo, hi = FLAT_LINES_BAND
+    if lo <= share <= hi:
+        return None
+    return (f'{share:.0%} of {len(sentence_words)} sentences are {SHORT_SENTENCE_WORDS} words or fewer '
+            f'(aim for {lo:.0%}-{hi:.0%})')
+
+
+def pacecheck(events, chapters, nonlexical=None, pacing='brisk'):
+    """Pacing metrics and warnings for parsed events (parse_script(), same pacing). Pure: no I/O.
+    -> {'lines', 'short_share', 'sentences', 'avg_words', 'sd_words', 'pauses',
+        'secs_per_pause', 'longest_pause_free': (secs, seg_no), 'longest_run':
+        (speaker, words, event_idx), 'nonlexical': n, 'sounds': {sound: n},
+        'figures_per_min', 'segments': [...], 'warnings': [(kind, msg)]}
+    short_share is the share of SENTENCES of <= SHORT_SENTENCE_WORDS words."""
+    import statistics
+    if nonlexical is None:
+        nonlexical = config.NONLEXICAL if config is not None else {}
+    total, _starts = estimate_seconds(events, pacing)
+    timeline = _pace_timeline(events, chapters, pacing)
+    says = [(i, ev) for i, ev in enumerate(events) if ev[0] == 'say']
+    line_no = {i: n for n, (i, _) in enumerate(says, 1)}
+    words = [len(_spoken_text(ev).split()) for _, ev in says]
+    sentences = [len(s.split()) for _, ev in says for s in split_sentences(_spoken_text(ev))]
+    speakers = {ev[1] for _, ev in says}
+    pauses = sum(1 for _, kind, _ in timeline if kind == 'pause')
+    warnings, segs, sounds = [], [], {}
+    longest_run, longest_free = (None, 0, None), (0.0, None)
+    total_figures = 0
+
+    for n, seg in enumerate(_pace_segments(events, chapters), 1):
+        a, b = seg['start'], seg['end']
+        label = f'segment {n}' + (f' "{seg["title"]}"' if seg['title'] else '')
+        items = [t for t in timeline if a <= t[0] < b]
+        secs = sum(t[2] for t in items)
+        free = best_free = 0.0
+        for _, kind, dur in items:
+            if kind == 'pause':
+                free = 0.0
+            elif kind != 'break':  # a closing `---` divider is the segment's end, not speech
+                free += dur
+                best_free = max(best_free, free)
+        seg_pauses = sum(1 for t in items if t[1] == 'pause')
+        lines = [(i, events[i]) for i in range(a, b) if events[i][0] == 'say']
+        figures = sum(len(FIGURE_RE.findall(_spoken_text(ev))) for _, ev in lines)
+        total_figures += figures
+        # Runs: consecutive lines by one speaker (pauses don't end a run; a segment does).
+        run = (None, 0, None)
+        for i, ev in lines:
+            w = len(_spoken_text(ev).split())
+            run = (ev[1], run[1] + w, run[2]) if ev[1] == run[0] else (ev[1], w, i)
+            if run[1] > longest_run[1]:
+                longest_run = run
+        # Sounds: counted per segment; a line that is only sound(s) is ALONE.
+        seg_sounds = 0
+        for i, ev in lines:
+            text = _written_words(ev)
+            found, rest = find_sounds(text, nonlexical)
+            for s in found:
+                sounds[s] = sounds.get(s, 0) + 1
+            seg_sounds += len(found)
+            banned = BANNED_SOUND_RE.findall(text)
+            if banned:
+                warnings.append(('BANNED_SOUND', f'dialogue line {line_no[i]} ({ev[1]}: {ev[2][:40]!r}) says '
+                                 f'{banned[0]!r}; Kokoro spells it as letters, use words ("Right.", "Okay.")'))
+            if found and not re.search(r'\w', rest):
+                warnings.append(('NONLEXICAL_ALONE', f'dialogue line {line_no[i]} ({ev[1]}: {ev[2][:40]!r}) '
+                                 f'is a sound on its own; put it in front of words'))
+        if seg_sounds > NONLEXICAL_PER_SEGMENT:
+            warnings.append(('NONLEXICAL_MANY', f'{label}: {seg_sounds} non-lexical sounds '
+                             f'(at most {NONLEXICAL_PER_SEGMENT} per segment)'))
+        # Roles: the listener (learner) asks the questions and takes the short turns. Scored
+        # per TURN (consecutive lines by one speaker), so one-sentence-per-line writing
+        # doesn't make the explainer look like the listener.
+        turns = []
+        for _, ev in lines:
+            if turns and turns[-1][0] == ev[1]:
+                turns[-1][1].append(_spoken_text(ev))
+            else:
+                turns.append((ev[1], [_spoken_text(ev)]))
+        score = {}
+        for speaker, texts in turns:
+            text = ' '.join(texts)
+            score[speaker] = score.get(speaker, 0) + ('?' in text) + (len(text.split()) <= LISTENER_LINE_WORDS)
+        teller = listener = None
+        if len(score) >= 2:
+            ranked = sorted(score.values())
+            if ranked[0] < ranked[1]:
+                teller = min(score, key=score.get)
+            if ranked[-1] > ranked[-2]:
+                listener = max(score, key=score.get)
+        if best_free > MAX_PAUSE_FREE_SECS:
+            warnings.append(('NO_PAUSE', f'{label}: no pause in {best_free / 60:.1f} min '
+                             f'(at most {MAX_PAUSE_FREE_SECS / 60:g} min)'))
+        elif secs > PAUSE_EVERY_SECS and (not seg_pauses or secs / seg_pauses > PAUSE_EVERY_SECS):
+            rate = f'1 per {secs / seg_pauses:.0f} s' if seg_pauses else 'none'
+            warnings.append(('NO_PAUSE', f'{label}: pauses {rate} over {secs / 60:.1f} min '
+                             f'(at least 1 per {PAUSE_EVERY_SECS:.0f} s)'))
+        seg_sentences = [len(x.split()) for _, ev in lines for x in split_sentences(_spoken_text(ev))]
+        flat = _flat_lines(seg_sentences)
+        if flat:
+            warnings.append(('FLAT_LINES', f'{label}: {flat}'))
+        if best_free > longest_free[0]:
+            longest_free = (best_free, n)
+        segs.append({'n': n, 'title': seg['title'], 'secs': secs, 'pauses': seg_pauses,
+                     'longest_pause_free': best_free, 'lines': len(lines),
+                     'figures_per_min': figures / (secs / 60.0) if secs else 0.0,
+                     'nonlexical': seg_sounds, 'teller': teller, 'listener': listener,
+                     'role_score': score, 'label': label, 'sentences': len(seg_sentences)})
+
+    secs_per_pause = total / pauses if pauses else None
+    if (len(segs) > 1 and total > PAUSE_EVERY_SECS  # one segment: already judged above
+            and (secs_per_pause is None or secs_per_pause > PAUSE_EVERY_SECS)):
+        rate = f'1 per {secs_per_pause:.0f} s' if pauses else 'none'
+        warnings.append(('NO_PAUSE', f'pauses {rate} over {total / 60:.1f} min '
+                         f'(at least 1 per {PAUSE_EVERY_SECS:.0f} s)'))
+    if len(speakers) >= 2 and longest_run[1] > LONG_RUN_WORDS:
+        warnings.append(('LONG_RUN', f'{longest_run[0]} speaks {longest_run[1]} words in a row from dialogue '
+                         f'line {line_no[longest_run[2]]} (at most {LONG_RUN_WORDS})'))
+    short_share = sum(1 for w in sentences if w <= SHORT_SENTENCE_WORDS) / len(sentences) if sentences else 0.0
+    flat = _flat_lines(sentences) if len(segs) > 1 else None  # one segment: already judged above
+    if flat:
+        warnings.append(('FLAT_LINES', f'episode: {flat}'))
+    # Fixed roles are a two-voice rule (casts/two-host.md `## Roles`): one host teaches every body segment. On a
+    # panel the guests take turns telling by design (casts/panel.md), and a solo narrator always tells. The cold
+    # open and the wrap (first and last segment, once there are at least three) and "roles unclear" segments are
+    # not judged. The episode's teller is the one who tells most body segments; a tie goes to the earliest.
+    body = segs[1:-1] if len(segs) >= 3 else segs
+    clear = [s for s in body if s['teller']] if len(speakers) == 2 else []
+    if clear:
+        counts = {}
+        for s in clear:
+            counts[s['teller']] = counts.get(s['teller'], 0) + 1
+        top = max(counts.values())
+        episode_teller = next(s['teller'] for s in clear if counts[s['teller']] == top)
+        for s in clear:
+            if s['teller'] != episode_teller:
+                warnings.append(('TELLER_CHANGED', f'{s["label"]}: {s["teller"]} tells, but {episode_teller} '
+                                 f'tells {top} of {len(clear)} body segments; keep one teller all episode'))
+    # Warnings in a stable order: by kind, then as found.
+    warnings.sort(key=lambda w: PACE_KINDS.index(w[0]))
+    return {'lines': len(says), 'short_share': short_share, 'sentences': len(sentences),
+            'avg_words': statistics.mean(words) if words else 0.0,
+            'sd_words': statistics.pstdev(words) if words else 0.0,
+            'pauses': pauses, 'secs_per_pause': secs_per_pause, 'total_secs': total,
+            'longest_pause_free': longest_free, 'longest_run': longest_run,
+            'nonlexical': sum(sounds.values()), 'sounds': sounds,
+            'figures_per_min': total_figures / (total / 60.0) if total else 0.0,
+            'segments': segs, 'warnings': warnings}
+
+
+def print_pacecheck(pc):
+    print(f"pacecheck  sentences ≤{SHORT_SENTENCE_WORDS} words {pc['short_share']:.0%} of {pc['sentences']}"
+          f"   line avg {pc['avg_words']:.1f} words (sd {pc['sd_words']:.1f}) over {pc['lines']} lines")
+    rate = f"1 per {pc['secs_per_pause']:.0f} s" if pc['pauses'] else 'none'
+    free, free_seg = pc['longest_pause_free']
+    run = pc['longest_run']
+    sounds = ', '.join(f'{k} {v}' for k, v in sorted(pc['sounds'].items())) or 'none'
+    print(f"  pauses {pc['pauses']} ({rate})   longest pause-free {fmt_mmss(free)}"
+          + (f' (seg {free_seg})' if free_seg else '')
+          + (f"   longest run {run[0]} {run[1]} words" if run[0] else '')
+          + f"   sounds {pc['nonlexical']} ({sounds})   figures {pc['figures_per_min']:.1f}/min")
+    for s in pc['segments']:
+        roles = f"{s['teller']}→{s['listener']}" if s['teller'] and s['listener'] else 'unclear'
+        title = f' "{s["title"]}"' if s['title'] else ''
+        print(f"  seg {s['n']}{title}  {fmt_mmss(s['secs'])}  pauses {s['pauses']}  "
+              f"pause-free {fmt_mmss(s['longest_pause_free'])}  roles {roles}  sounds {s['nonlexical']}")
+    for kind, msg in pc['warnings']:
+        print(f"  ⚠ {kind}: {msg}")
 
 
 def atomic_write(path, write_fn):
@@ -759,7 +1282,12 @@ def build_arg_parser():
                      help='pronunciation rules file; default is <directory of SCRIPT>/'
                           'lexicon.txt if the episode has one, else the templates/lexicon.txt '
                           'shipped with this skill (see default_lexicon_path())')
+    ap.add_argument('--pacing', choices=PACINGS, default=None,
+                    help='silences between sentences, turns and segments: brisk (0.2.0 timing), '
+                         'relaxed or spacious (default: config default_pacing, "relaxed")')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--strict', action='store_true',
+                    help='with --dry-run: exit 4 if pacecheck prints any warning')
     ap.add_argument('--selftest', action='store_true')
     return ap
 
@@ -928,6 +1456,12 @@ def _make_piper_engine(voices):
     return _Engine('piper', default_sr, synth)
 
 
+def _ref_speech(*chunk_words):
+    """Selftest reference for the speech model, written out independently of speech_seconds():
+    each chunk of n words is n / WPM minutes plus CHUNK_OVERHEAD, never below MIN_CHUNK_SECONDS."""
+    return sum(max(MIN_CHUNK_SECONDS, n / WPM * 60.0 + CHUNK_OVERHEAD) for n in chunk_words)
+
+
 def run_selftest():
     import tempfile
     import subprocess
@@ -974,23 +1508,39 @@ def run_selftest():
         bad_path = os.path.join(td, 'bad.txt')
         with open(bad_path, 'w', encoding='utf-8') as f:
             f.write("MAYA: fine.\nJUDY: not a known voice.\n")
+        import io, contextlib
+        err_buf = io.StringIO()
         try:
-            parse_script(bad_path, voices, pattern, rules)
+            with contextlib.redirect_stderr(err_buf):
+                parse_script(bad_path, voices, pattern, rules)
             check('unknown speaker exits', False)
         except SystemExit as e:
-            check('unknown speaker exits', True)
-            check('unknown speaker error names line 2', str(e).startswith(f'{bad_path}:2:'))
+            check('unknown speaker exits 2 (bad input), not 1', e.code == 2)
+            check('unknown speaker error names line 2', err_buf.getvalue().startswith(f'{bad_path}:2:'))
 
         # [pause 1.2.3] is a clean error naming the line, not a crash.
         pause_path = os.path.join(td, 'badpause.txt')
         with open(pause_path, 'w', encoding='utf-8') as f:
             f.write("MAYA: hi\n[pause 1.2.3]\n")
+        err_buf = io.StringIO()
         try:
-            parse_script(pause_path, voices, pattern, rules)
+            with contextlib.redirect_stderr(err_buf):
+                parse_script(pause_path, voices, pattern, rules)
             check('[pause 1.2.3] exits with a clean error', False)
         except SystemExit as e:
-            check('[pause 1.2.3] exits with a clean error', True)
-            check('bad pause error names line 2', str(e).startswith(f'{pause_path}:2:'))
+            check('[pause 1.2.3] exits 2 (bad input), not 1', e.code == 2)
+            check('bad pause error names line 2', err_buf.getvalue().startswith(f'{pause_path}:2:'))
+        # A missing script is bad input too: exit 2 with a message, never a traceback.
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                parse_script(os.path.join(td, 'no-such-script.txt'), voices, pattern, rules)
+            check('missing script exits 2', False)
+        except SystemExit as e:
+            check('missing script exits 2 naming the file',
+                  e.code == 2 and 'no-such-script.txt' in err_buf.getvalue())
+        except Exception as e:  # a traceback is the bug this guards against
+            check(f'missing script exits 2 (got {type(e).__name__})', False)
 
         # Malformed --voices is a clear error, not a crash.
         try:
@@ -1060,11 +1610,386 @@ def run_selftest():
                       ('pause', 2.0),
                       ('say', 'ALEX', 'six seven eight', 'six seven eight')]
         total, starts = estimate_seconds(est_events)
-        expected = (5 / WPM * 60.0) + 2.0 + (3 / WPM * 60.0)
+        expected = _ref_speech(5) + 2.0 + _ref_speech(3)
         check('duration estimate matches manual arithmetic', abs(total - expected) < 1e-9)
         check('chapter start for first event is 0.0', starts[0] == 0.0)
         check('chapter start after pause accounts for speech + pause',
-              abs(starts[2] - (5 / WPM * 60.0 + 2.0)) < 1e-9)
+              abs(starts[2] - (_ref_speech(5) + 2.0)) < 1e-9)
+
+        # Inline [pause N] inside a speaker line: the line splits into spoken chunks
+        # with silence between them, the lexicon applies per chunk, and the whole thing
+        # stays ONE say event (a one-word line alone fails QA as DROPPED).
+        inline_path = os.path.join(td, 'inline.txt')
+        with open(inline_path, 'w', encoding='utf-8') as f:
+            f.write("MAYA: The X-team met today.\n"
+                    "ALEX: Wait. [pause 0.8] So the X-team was wrong?\n"
+                    "MAYA: Yes. [pause 0.3] [pause 0.25] Mostly.\n")
+        in_events, _ = parse_script(inline_path, voices, pattern, rules)
+        check('inline pause: line parses into chunks + silence (one say event)',
+              len(in_events) == 3 and in_events[1] == (
+                  'say', 'ALEX', 'Wait. [pause 0.8] So the X-team was wrong?',
+                  'Wait. So the ex team was wrong?',
+                  (('text', 'Wait.'), ('pause', 0.8), ('text', 'So the ex team was wrong?'))))
+        check('inline pause: consecutive pauses stay separate segments',
+              line_segments(in_events[2]) == (('text', 'Yes.'), ('pause', 0.3), ('pause', 0.25), ('text', 'Mostly.')))
+        check('a line without an inline pause produces the same 4-tuple event as before',
+              in_events[0] == ('say', 'MAYA', 'The X-team met today.',
+                               apply_lexicon('The X-team met today.', pattern, rules)))
+        # estimate_seconds() counts the inline silence, so --dry-run matches the render.
+        in_total, _ = estimate_seconds(in_events)
+        in_expected = _ref_speech(5, 1, 6, 1, 1) + 2 * TURN_GAP + 0.8 + 0.3 + 0.25
+        check('estimate includes inline pause seconds', abs(in_total - in_expected) < 1e-9)
+        for bad_tok in ('[pause 1.2.3]', '[pause 0]', '[pause 10.5]', '[Pause 1]', '[pause 0.8',
+                        '[pause 1] .'):  # last: a chunk with no word is rejected, not merged
+            badin_path = os.path.join(td, 'badinline.txt')
+            with open(badin_path, 'w', encoding='utf-8') as f:
+                f.write(f"MAYA: fine.\n\nALEX: Wait. {bad_tok}\n" if bad_tok.endswith('.')
+                        else f"MAYA: fine.\n\nALEX: Wait. {bad_tok} So?\n")
+            err_buf = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err_buf):
+                    parse_script(badin_path, voices, pattern, rules)
+                check(f'malformed inline {bad_tok!r} exits 2 naming line 3', False)
+            except SystemExit as e:
+                check(f'malformed inline {bad_tok!r} exits 2 naming line 3',
+                      e.code == 2 and err_buf.getvalue().startswith(f'{badin_path}:3:'))
+        # A bracket with no number is dialogue, not a directive: rendered as before.
+        lit_path = os.path.join(td, 'literal.txt')
+        lit_lines = ['Hit [pause] then play.', 'The [pause-button] sticks.', 'Say [pause x] aloud.']
+        with open(lit_path, 'w', encoding='utf-8') as f:
+            f.write(''.join(f'MAYA: {t}\n' for t in lit_lines))
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                lit_events, _ = parse_script(lit_path, voices, pattern, rules)
+        except SystemExit:
+            lit_events = None
+        check('"[pause]", "[pause-button]", "[pause x]" in dialogue render as before (plain 4-tuples)',
+              lit_events == [('say', 'MAYA', t, apply_lexicon(t, pattern, rules)) for t in lit_lines])
+
+        # plan_assembly(): the render's timeline, with a fake duration (0.1 s per char).
+        fake = lambda sp, text: len(str(text)) / 10.0
+        plan_events = [('say', 'MAYA', 'Hi.', 'Hi.'),
+                       ('say', 'ALEX', 'Wait. [pause 0.8] So?', 'Wait. So?',
+                        (('text', 'Wait.'), ('pause', 0.8), ('text', 'So?'))),
+                       ('say', 'MAYA', 'Yes.', 'Yes.')]
+        ops, recs = plan_assembly(plan_events, [('One', 0), ('Two', 2)], fake)
+        check('plan: silence sits between the chunks, turn gaps unchanged',
+              ops == [('say', 'MAYA', 'Hi.'), ('silence', TURN_GAP),
+                      ('say', 'ALEX', 'Wait.'), ('silence', 0.8), ('say', 'ALEX', 'So?'),
+                      ('silence', TURN_GAP), ('say', 'MAYA', 'Yes.')])
+        check('plan: a chapter after an inline line starts after its pause',
+              [r['title'] for r in recs] == ['One', 'Two'] and recs[0]['start'] == 0.0
+              and abs(recs[1]['start'] - (0.3 + TURN_GAP + 0.5 + 0.8 + 0.3 + TURN_GAP)) < 1e-9)
+        old_events = [('say', 'MAYA', 'Hi.', 'Hi.'), ('pause', 1.5), ('pause', SEGMENT_GAP),
+                      ('say', 'ALEX', 'Ok.', 'Ok.'), ('say', 'MAYA', 'Bye.', 'Bye.')]
+        old_ops, old_recs = plan_assembly(old_events, [('End', 4)], fake)
+        check('plan: a script without inline pauses gives exactly the old op sequence',
+              old_ops == [('say', 'MAYA', 'Hi.'), ('silence', 1.5), ('silence', SEGMENT_GAP),
+                          ('say', 'ALEX', 'Ok.'), ('silence', TURN_GAP), ('say', 'MAYA', 'Bye.')]
+              and abs(old_recs[0]['start'] - (0.3 + 1.5 + SEGMENT_GAP + 0.3 + TURN_GAP)) < 1e-9)
+        lines_seen = []
+        plan_assembly(plan_events, [], fake, on_line=lambda: lines_seen.append(1))
+        check('plan: on_line fires once per line, not per chunk', len(lines_seen) == 3)
+
+        # ── 3.1 pacing ─────────────────────────────────────────────────────────
+        nolex = (None, {})
+        pace_path = os.path.join(td, 'pacing.txt')
+        with open(pace_path, 'w', encoding='utf-8') as f:
+            f.write("# ── 1. One ──\n"
+                    "MAYA: Back to the start. A boat can sail upwind.\n"
+                    "MAYA: Can it point straight at the wind?\n"
+                    "ALEX: Okay. So it zigzags. Wait. [pause 0.6] Really?\n"
+                    "[pause 1.2]\n"
+                    "MAYA: No. It tacks.\n"
+                    "---\n"
+                    "ALEX: Got it.\n")
+
+        def pace_ops(pacing, path=pace_path, fn=None):
+            ev, ch = parse_script(path, voices, *nolex, pacing)
+            return plan_assembly(ev, ch, fn or (lambda sp, text: 1.0), pacing=pacing)[0]
+
+        # (A) brisk is 0.2.0: whole lines, 0.32 between any two lines, 1.1 at ---, a
+        # [pause N] line replaces the gap. The literal numbers are 0.2.0's TURN_GAP/SEGMENT_GAP.
+        check('brisk: the 0.2.0 op sequence (whole lines, 0.32 s gaps, 1.1 s segment)',
+              pace_ops('brisk') == [
+                  ('say', 'MAYA', 'Back to the start. A boat can sail upwind.'), ('silence', 0.32),
+                  ('say', 'MAYA', 'Can it point straight at the wind?'), ('silence', 0.32),
+                  ('say', 'ALEX', 'Okay. So it zigzags. Wait.'), ('silence', 0.6), ('say', 'ALEX', 'Really?'),
+                  ('silence', 1.2), ('say', 'MAYA', 'No. It tacks.'), ('silence', 1.1),
+                  ('say', 'ALEX', 'Got it.')])
+        b_ev, _ = parse_script(pace_path, voices, *nolex, 'brisk')
+        check('brisk: a line without an inline pause stays a 4-tuple (never sentence-split)',
+              [len(e) for e in b_ev if e[0] == 'say'] == [4, 4, 5, 4, 4])
+        check('GAPS: brisk is 0.32 everywhere and 1.1 at a segment; TURN_GAP/SEGMENT_GAP name it',
+              all(v == 0.32 for k, v in GAPS['brisk'].items() if k != 'segment')
+              and GAPS['brisk']['segment'] == 1.1 and (TURN_GAP, SEGMENT_GAP) == (0.32, 1.1))
+        check('GAPS: every pacing has every kind (continue, sentence, handoff, reaction, question, dense, segment)',
+              all(set(row) == set(GAP_KINDS) for row in GAPS.values()) and len(GAP_KINDS) == 7)
+        check('GAPS: pacings are brisk, relaxed, spacious and match config.PACINGS',
+              PACINGS == ('brisk', 'relaxed', 'spacious')
+              and (config is None or tuple(config.PACINGS) == PACINGS))
+
+        # (B) relaxed splits a line into sentences with the v6 formatter's rules. The oracle
+        # is that formatter's own loop, copied verbatim.
+        def fmt2_oracle(text):
+            merged = []
+            for sent in re.split(r'(?<=[^.][.?!])\s+(?!\[pause)', text):
+                if merged and (len(merged[-1].split()) == 1 and merged[-1] != 'No.'):
+                    merged[-1] += ' ' + sent
+                else:
+                    merged.append(sent)
+            return merged
+        split_cases = {
+            'Wait. [pause 0.7] So the diagram is just wrong?': ['Wait. [pause 0.7] So the diagram is just wrong?'],
+            'Which makes no sense. Wind pushes. How... do you get pushed?':
+                ['Which makes no sense.', 'Wind pushes.', 'How... do you get pushed?'],
+            "Okay. So tacking isn't a trick. It's just how you go upwind.":
+                ["Okay. So tacking isn't a trick.", "It's just how you go upwind."],
+            'No. Roughly forty-five degrees. Sailors call that the no-go zone.':
+                ['No.', 'Roughly forty-five degrees.', 'Sailors call that the no-go zone.'],
+            'Honestly? Knowing the wing part helps. I want that first.':
+                ['Honestly? Knowing the wing part helps.', 'I want that first.'],
+            'So the gentle turn is the one into the wind. Got it.':
+                ['So the gentle turn is the one into the wind.', 'Got it.'],
+            'I would have pictured the wind... just pushing it.': ['I would have pictured the wind... just pushing it.'],
+            'Hold on. [pause 0.5] Let me try it back. The sail... pulls sideways.':
+                ['Hold on. [pause 0.5] Let me try it back.', 'The sail... pulls sideways.'],
+            'Right. Fine. So that works!': ['Right. Fine.', 'So that works!'],
+        }
+        # The formatter behind v6 and split_turn() agree on every case above; the cases
+        # below are where split_turn() deliberately does better (review of 3.1).
+        better_cases = {
+            'It stops. Done.': ['It stops. Done.'],  # a one-word last sentence joins the one before
+            'It works. Okay.': ['It works. Okay.'],
+            'The U.S. Navy sailed. Then it docked.': ['The U.S. Navy sailed.', 'Then it docked.'],
+            'The U.S. economy grew. Then it shrank.': ['The U.S. economy grew.', 'Then it shrank.'],
+            'Use a tool, e.g. a hammer. Then stop.': ['Use a tool, e.g. a hammer.', 'Then stop.'],
+            'At 5 p.m. we met. Then we left.': ['At 5 p.m. we met.', 'Then we left.'],
+            'Mr. and Mrs. Smith came. Dr. Jones came too.': ['Mr. and Mrs. Smith came.', 'Dr. Jones came too.'],
+            'Look at item No. 5 today. Then go.': ['Look at item No. 5 today.', 'Then go.'],
+            'It grew 4. 5 percent is a lot.': ['It grew 4. 5 percent is a lot.'],
+            'He said "Go. Now." Then he left.': ['He said "Go. Now."', 'Then he left.'],
+            'She asked (why?) Then she left.': ['She asked (why?)', 'Then she left.'],
+            'Is it...? Yes it is.': ['Is it...?', 'Yes it is.'],
+            'It was... Huge, really. Then calm.': ['It was... Huge, really.', 'Then calm.'],  # a hold, not an end
+        }
+        check('relaxed: split_turn() gives the expected sentences ("...", inline pause, one-word merge, "No.")',
+              all(split_turn(t) == want for t, want in split_cases.items()))
+        bad = [t for t, want in better_cases.items() if split_turn(t) != want]
+        check('relaxed: no cut inside an abbreviation (U.S., e.g., p.m., Mr./Dr., No. 5), a number or a quote; '
+              'a lone last word joins the sentence before' + (f' -- wrong: {bad}' if bad else ''), not bad)
+        check('pacecheck counts sentences at the same boundaries the renderer cuts',
+              [len(split_sentences(t)) for t in ('The U.S. Navy sailed. Then it docked.',
+                                                     'He said "Go. Now." Then he left.', 'At 5 p.m. we met.',
+                                                     'Wait... no. Yes!')] == [2, 2, 1, 2])
+        check('relaxed: split_turn() agrees with the v6 formatter on every fixture',
+              all(split_turn(t) == fmt2_oracle(t) for t in split_cases))
+        check('relaxed: a doubled space before an inline pause does not split off the beat',
+              split_turn('Wait.  [pause 0.5] So?') == ['Wait.  [pause 0.5] So?'])
+
+        # (C) relaxed gaps: 0.32 between sentences and same-speaker lines, 0.7 at a speaker
+        # change, a [pause N] line replaces the gap, an inline pause is exact.
+        check('relaxed: sentence chunks, 0.32 s within a speaker, 0.7 s at a handoff, 2.0 s segment',
+              pace_ops('relaxed') == [
+                  ('say', 'MAYA', 'Back to the start.'), ('silence', 0.32),
+                  ('say', 'MAYA', 'A boat can sail upwind.'), ('silence', 0.32),
+                  ('say', 'MAYA', 'Can it point straight at the wind?'), ('silence', 0.7),
+                  ('say', 'ALEX', 'Okay. So it zigzags.'), ('silence', 0.32), ('say', 'ALEX', 'Wait.'),
+                  ('silence', 0.6), ('say', 'ALEX', 'Really?'),
+                  ('silence', 1.2), ('say', 'MAYA', 'No.'), ('silence', 0.32), ('say', 'MAYA', 'It tacks.'),
+                  ('silence', 2.0), ('say', 'ALEX', 'Got it.')])
+        r_ev, _ = parse_script(pace_path, voices, *nolex, 'relaxed')
+        check('relaxed: a split line is still ONE say event, its spoken text unchanged',
+              [e[3] for e in r_ev if e[0] == 'say'] == [e[3] for e in b_ev if e[0] == 'say'])
+        say = lambda sp, text: ('say', sp, text, text)
+        check('gap_kind: same speaker is continue, even after a question',
+              gap_kind(say('MAYA', 'Is it?'), say('MAYA', 'Yes.')) == 'continue')
+        check('gap_kind: a speaker change is question / dense / reaction / handoff, most specific first',
+              [gap_kind(say('MAYA', t), say('ALEX', 'Next line here please.')) for t in
+               ('Did the boat really move upwind?', 'It was forty-five degrees and two knots today.',
+                'Right, okay.', 'The sail is a wing standing up in the wind.')]
+              == ['question', 'dense', 'reaction', 'handoff'])
+        check('gap_for: relaxed 0.7 for every handoff kind, 0.32 to continue; brisk 0.32 for all',
+              [gap_for(say('MAYA', t), say(sp, 'x y z w v u'), 'relaxed') for t, sp in
+               (('Is it?', 'ALEX'), ('One two three.', 'ALEX'), ('A long enough line of words.', 'ALEX'),
+                ('Is it?', 'MAYA'))] == [0.7, 0.7, 0.7, 0.32]
+              and {gap_for(say('MAYA', 'Is it?'), say(sp, 'x'), 'brisk') for sp in ('MAYA', 'ALEX')} == {0.32})
+        check('spacious: 0.45 within a speaker, 0.91 (relaxed x 1.3) at a handoff, 2.6 s segment',
+              [op for op in pace_ops('spacious') if op[0] == 'silence'] ==
+              [('silence', x) for x in (0.45, 0.45, 0.91, 0.45, 0.6, 1.2, 0.45, 2.6)])
+
+        check('gap_kind: the question test reads the last sentence, closing quote included',
+              [gap_kind(say('MAYA', t), say('ALEX', 'A reply of enough words here.')) for t in
+               ('He asked me "does it work?"', 'Is it? I think the boat moves anyway, though.')]
+              == ['question', 'handoff'])
+
+        # (K) the lexicon under a splitting pacing: a rule that spans ". " is applied whole
+        # (no cut inside a match), and every chunk, with or without an inline pause, is respelled.
+        plex_path = os.path.join(td, 'pace-lex.txt')
+        with open(plex_path, 'w', encoding='utf-8') as f:
+            f.write("U.S. Navy => you ess navy\nGo. Now => go now\nX-team => ex team\n")
+        plex = load_lexicon(plex_path, explicit=True)
+        plex_script = os.path.join(td, 'pace-lex-script.txt')
+        with open(plex_script, 'w', encoding='utf-8') as f:
+            f.write("MAYA: Then I said Go. Now we sail. The X-team won. The U.S. Navy watched.\n"
+                    "ALEX: Wait. [pause 0.5] The X-team? Sure thing, the X-team.\n")
+        for pc in ('relaxed', 'spacious'):
+            lev, _ = parse_script(plex_script, voices, *plex, pc)
+            chunks = [[v for k, v in line_segments(e) if k == 'text'] for e in lev]
+            check(f'{pc} + lexicon: a rule across ". " applies whole; every chunk is respelled',
+                  chunks == [['Then I said go now we sail.', 'The ex team won.', 'The you ess navy watched.'],
+                             ['Wait.', 'The ex team?', 'Sure thing, the ex team.']])
+        blev, _ = parse_script(plex_script, voices, *plex, 'brisk')
+        check('brisk + lexicon: the spoken text equals the split pacings\' joined chunks',
+              [e[3] for e in blev] == [e[3] for e in parse_script(plex_script, voices, *plex, 'relaxed')[0]])
+
+        # (L) Episode: the one parse -> estimate / pacecheck / plan path main() takes.
+        for pc in PACINGS:
+            ep = Episode(pace_path, voices, *nolex, pc)
+            ev_pc, ch_pc = parse_script(pace_path, voices, *nolex, pc)
+            fake_d = lambda sp, text: len(text) / 10.0
+            check(f'Episode({pc}): estimate, pacecheck and plan all use {pc}',
+                  ep.estimate() == estimate_seconds(ev_pc, pc)
+                  and ep.pacecheck()['total_secs'] == pacecheck(ev_pc, ch_pc, pacing=pc)['total_secs']
+                  and ep.plan(fake_d) == plan_assembly(ev_pc, ch_pc, fake_d, pacing=pc))
+        ep_b, ep_r = Episode(pace_path, voices, *nolex, 'brisk'), Episode(pace_path, voices, *nolex, 'relaxed')
+        check('Episode: brisk and relaxed differ in estimate, pacecheck and plan',
+              ep_b.estimate()[0] != ep_r.estimate()[0]
+              and ep_b.pacecheck()['total_secs'] != ep_r.pacecheck()['total_secs']
+              and ep_b.plan(lambda sp, t: 1.0)[0] != ep_r.plan(lambda sp, t: 1.0)[0])
+
+        # (D) a --- divider: 1.1 / 2.0 / 2.6 s by pacing, and still a SegmentBreak for pacecheck.
+        seg_events = [('say', 'MAYA', 'Hi.', 'Hi.'), ('pause', SegmentBreak(SEGMENT_GAP)), ('say', 'ALEX', 'Ok.', 'Ok.')]
+        check('segment gap per pacing: brisk 1.1, relaxed 2.0, spacious 2.6',
+              [plan_assembly(seg_events, [], lambda sp, t: 0.0, pacing=pc)[0][1] for pc in PACINGS]
+              == [('silence', 1.1), ('silence', 2.0), ('silence', 2.6)])
+
+        # (E) the cache: gaps are not in the key, so relaxed <-> spacious and brisk -> brisk
+        # synthesise nothing new; brisk -> relaxed synthesises the new sentence chunks once.
+        def synth_counter():
+            seen, calls = set(), [0]
+
+            def synth(sp, text):
+                key = cache_key('fake', voices[sp], 24000, 1.0, text)
+                if key not in seen:
+                    seen.add(key)
+                    calls[0] += 1
+                return 1.0
+            return synth, calls
+        synth, calls = synth_counter()
+        counts = []
+        for pc in ('brisk', 'brisk', 'relaxed', 'spacious', 'relaxed', 'brisk'):
+            calls[0] = 0
+            pace_ops(pc, fn=synth)
+            counts.append(calls[0])
+        check('cache: synth calls brisk 6, brisk again 0, relaxed 6 new sentence chunks, spacious 0, '
+              'relaxed 0, brisk 0', counts == [6, 0, 6, 0, 0, 0])
+        check('cache: no gap or pacing in the cache key (CACHE_VERSION is trim-only)',
+              CACHE_VERSION == f'trim{TRIM_THRESHOLD_DB}dB-{TRIM_PAD[0]}-{TRIM_PAD[1]}')
+
+        # (F) the estimate is the planned timeline at WPM, for every pacing.
+        for pc in PACINGS:
+            ev, ch = parse_script(pace_path, voices, *nolex, pc)
+            ops = plan_assembly(ev, ch, lambda sp, text: speech_seconds(text), pacing=pc)[0]
+            want = sum(speech_seconds(o[2]) if o[0] == 'say' else o[1] for o in ops)
+            check(f'estimate_seconds({pc}) equals its planned timeline',
+                  abs(estimate_seconds(ev, pc)[0] - want) < 1e-9)
+        # (F2) the speech model itself: per-chunk words/WPM + CHUNK_OVERHEAD, floored; and it stays
+        # within 5% of ffprobe on four measured relaxed renders (words, chunks, gap seconds from
+        # this parser, measured seconds; two-host kokoro, 2026-10).
+        check('speech_seconds: a 40-word chunk is words/WPM + CHUNK_OVERHEAD',
+              abs(speech_seconds(' '.join(['w'] * 40)) - (40 / WPM * 60.0 + CHUNK_OVERHEAD)) < 1e-9)
+        check('speech_seconds: a one-word chunk is floored, never ~0', speech_seconds('Huh.') == MIN_CHUNK_SECONDS)
+        check('speech_seconds: splitting 20+20 words into two chunks costs one more CHUNK_OVERHEAD',
+              abs(2 * speech_seconds(' '.join(['w'] * 20)) - speech_seconds(' '.join(['w'] * 40)) - CHUNK_OVERHEAD) < 1e-9)
+        for words, chunks, gaps, measured in ((375, 37, 15.7, 136.13), (730, 103, 58.8, 281.23),
+                                              (1710, 187, 102.18, 691.78), (1546, 137, 73.68, 596.50)):
+            model = words / WPM * 60.0 + chunks * CHUNK_OVERHEAD + gaps
+            check(f'speech model within 5% of a measured relaxed render ({words} words: '
+                  f'{model:.0f} s vs {measured:.0f} s)', abs(model / measured - 1) < 0.05)
+        est = {pc: estimate_seconds(parse_script(pace_path, voices, *nolex, pc)[0], pc)[0] for pc in PACINGS}
+        check('estimate: brisk < relaxed < spacious', est['brisk'] < est['relaxed'] < est['spacious'])
+        pc_r = pacecheck(*parse_script(pace_path, voices, *nolex, 'relaxed'), pacing='relaxed')
+        check('pacecheck(relaxed): totals match the relaxed estimate; sentence gaps are not pauses',
+              abs(pc_r['total_secs'] - est['relaxed']) < 1e-9
+              and pc_r['pauses'] == pacecheck(*parse_script(pace_path, voices, *nolex, 'brisk'))['pauses'] == 2)
+
+        # (J) relaxed on a turn-form script = brisk on the same script written one sentence
+        # per line with [pause 0.7] at each speaker change (how the approved v6 was made).
+        turns_path = os.path.join(td, 'turns.txt')
+        lines_path = os.path.join(td, 'lines.txt')
+        with open(turns_path, 'w', encoding='utf-8') as f:
+            f.write("MAYA: Can a boat point at the wind? No. Not quite.\n"
+                    "ALEX: Huh. [pause 0.7] So it... zigzags? Each turn is a tack.\n[pause 1.2]\n"
+                    "MAYA: Exactly. Under sail, it's the only way.\n")
+        with open(lines_path, 'w', encoding='utf-8') as f:
+            f.write("MAYA: Can a boat point at the wind?\nMAYA: No.\nMAYA: Not quite.\n[pause 0.7]\n"
+                    "ALEX: Huh. [pause 0.7] So it... zigzags?\nALEX: Each turn is a tack.\n[pause 1.2]\n"
+                    "MAYA: Exactly. Under sail, it's the only way.\n")
+        check('relaxed on turns == brisk on one-sentence lines + [pause 0.7] handoffs (the v6 recipe)',
+              pace_ops('relaxed', turns_path) == pace_ops('brisk', lines_path))
+
+        # (G) pacing resolution: --pacing > config default_pacing; bare checkout is brisk.
+        class _PaceCfg:
+            def __init__(self, value):
+                self.value = value
+
+            def load(self):
+                return {'default_pacing': self.value}
+        check('resolve_pacing: --pacing wins over config',
+              resolve_pacing('spacious', which_config=_PaceCfg('brisk')) == 'spacious')
+        check('resolve_pacing: config default_pacing used when --pacing is absent',
+              resolve_pacing(None, which_config=_PaceCfg('brisk')) == 'brisk')
+        check('resolve_pacing: no config.py (bare checkout) is brisk, 0.2.0 timing',
+              resolve_pacing(None, which_config=None) == 'brisk')
+        err_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_buf):
+                resolve_pacing(None, which_config=_PaceCfg('fast'))
+            check('resolve_pacing: a bad configured value exits 2', False)
+        except SystemExit as e:
+            check('resolve_pacing: a bad configured value exits 2 naming brisk, relaxed, spacious',
+                  e.code == 2 and 'brisk, relaxed, spacious' in err_buf.getvalue())
+
+        # (H) the CLI: --pacing is validated, the dry run reports per pacing, a missing script is exit 2.
+        def dry(*extra):
+            return subprocess.run([sys.executable, __file__, *extra], capture_output=True, text=True)
+        r_bad = dry(pace_path, '--dry-run', '--pacing', 'fast')
+        check('--pacing fast exits 2 naming brisk, relaxed, spacious',
+              r_bad.returncode == 2 and all(x in r_bad.stderr for x in ('brisk', 'relaxed', 'spacious')))
+        outs = {pc: dry(pace_path, '--dry-run', '--pacing', pc) for pc in PACINGS}
+        check('--dry-run --pacing: exit 0 and names the pacing it estimated',
+              all(o.returncode == 0 and f'({pc} pacing)' in o.stdout for pc, o in outs.items()))
+        # The printed estimate and pacecheck segment time are the pacing's own, so main()
+        # cannot drop the pacing on the way (parse, estimate or pacecheck).
+        long_path = os.path.join(td, 'long.txt')
+        with open(long_path, 'w', encoding='utf-8') as f:
+            f.write('# ── 1. Long ──\n' + ''.join(
+                f"{('MAYA', 'ALEX')[k % 2]}: The boat turns into the wind here. It slows down a lot. "
+                f"Then the sail fills again.\n" for k in range(12)))
+        printed, expected = {}, {}
+        for pc in PACINGS:
+            o = dry(long_path, '--dry-run', '--pacing', pc, '--voices', 'MAYA=af_heart,ALEX=am_michael',
+                    '--lexicon', plex_path)
+            est_line = next((l for l in o.stdout.splitlines() if l.startswith('estimated duration:')), '')
+            seg_line = next((l for l in o.stdout.splitlines() if l.startswith('  seg 1')), '')
+            printed[pc] = (est_line.split()[2:3], seg_line.split()[4:5])
+            lev, lch = parse_script(long_path, voices, *plex, pc)
+            expected[pc] = ([fmt_mmss(estimate_seconds(lev, pc)[0])],
+                            [fmt_mmss(pacecheck(lev, lch, pacing=pc)['segments'][0]['secs'])])
+        check(f'--dry-run prints each pacing\'s own estimate and segment time ({printed})',
+              printed == expected and printed['brisk'] != printed['relaxed'] != printed['spacious'])
+        r_missing = dry(os.path.join(td, 'nope-script.txt'), '--dry-run', '--pacing', 'brisk')
+        check('a missing script exits 2 with a message, no traceback',
+              r_missing.returncode == 2 and 'not found' in r_missing.stderr
+              and 'Traceback' not in r_missing.stderr)
+
+        # Tier 0: --dry-run parses and estimates inline pauses with no engine imported.
+        dr = subprocess.run([sys.executable, __file__, inline_path, '--dry-run',
+                             '--voices', 'MAYA=af_heart,ALEX=am_michael', '--lexicon', lex_path],
+                            capture_output=True, text=True)
+        check('--dry-run handles inline pauses (exit 0, 14 spoken words)',
+              dr.returncode == 0 and '3 dialogue lines, 14 spoken words' in dr.stdout)
 
         # Cache key includes the trim/model version, so changing it invalidates old
         # entries -- mutate the real module constant and call the real cache_key()
@@ -1729,6 +2654,264 @@ def run_selftest():
         check('old tmp file owned by a dead pid is removed', not os.path.exists(old_dead))
         check('a real (non-tmp) cache file is never touched by cleanup', os.path.exists(not_a_tmp))
 
+    # ---- pacecheck: one fixture per metric, one per warning kind (fictional topic) ----
+    with tempfile.TemporaryDirectory() as ptd:
+        no_lex = load_lexicon(None)
+
+        def pace_parse(name, text):
+            path = os.path.join(ptd, name)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            return path, parse_script(path, voices, *no_lex)
+
+        def kinds(pc):
+            return [k for k, _ in pc['warnings']]
+
+        LONG = 'The colony keeps its brood close to the warm centre of the comb.'  # 13 words
+        SHORT = 'Bees fan the brood.'  # 4 words
+
+        check('split_sentences: ends at . ? !, not at a "..." hold',
+              split_sentences('So there\'s... no path. And it lifts? Yes! Done') ==
+              ["So there's... no path.", 'And it lifts?', 'Yes!', 'Done'])
+        check('SegmentBreak: equal to SEGMENT_GAP, so events compare as before',
+              SegmentBreak(SEGMENT_GAP) == SEGMENT_GAP and ('pause', SegmentBreak(SEGMENT_GAP)) == ('pause', SEGMENT_GAP))
+
+        # Clean fixture: two segments, a pause in each, MAYA tells both, one sound in front of
+        # words, and a short-sentence share at the middle of FLAT_LINES_BAND.
+        lo, hi = FLAT_LINES_BAND
+        mid = (lo + hi) / 2
+        seg1 = ['ALEX: Why do the bees huddle up in winter?', f'MAYA: {LONG} {LONG}', '[pause 1]',
+                'ALEX: Hmm. [pause 0.6] So the middle of the cluster stays warm?']
+        seg2 = ['MAYA: And what changes once spring finally arrives?', f'ALEX: {LONG} [pause 0.8] {LONG}']
+
+        def build_clean(t1, t2, asker2='ALEX', teller2='MAYA'):
+            seg2 = [f'{asker2}: And what changes once spring finally arrives?',
+                    f'{teller2}: {LONG} [pause 0.8] {LONG}']
+            return '\n'.join(['# ── 1. Winter ──'] + seg1 + (['MAYA: ' + ' '.join(t1)] if t1 else [])
+                             + ['---', '# ── 2. Spring ──'] + seg2
+                             + ([f'{teller2}: ' + ' '.join(t2)] if t2 else [])) + '\n'
+
+        tell1, tell2 = [], []
+        for _ in range(60):  # top up the tellers' lines until the share sits mid-band
+            clean_text = build_clean(tell1, tell2)
+            _, (c_events, c_chapters) = pace_parse('clean.txt', clean_text)
+            share = pacecheck(c_events, c_chapters)['short_share']
+            if abs(share - mid) < 0.04:
+                break
+            (tell1 if len(tell1) <= len(tell2) else tell2).append(SHORT if share < mid else LONG)
+        pc = pacecheck(c_events, c_chapters)
+        check('pacecheck: the clean fixture has no warnings', pc['warnings'] == [])
+        check('pacecheck: lines counted', pc['lines'] == sum(1 for e in c_events if e[0] == 'say'))
+        check('pacecheck: inline and whole-line pauses count, a --- divider does not', pc['pauses'] == 3)
+        check('pacecheck: secs_per_pause = estimate / pauses',
+              abs(pc['secs_per_pause'] - estimate_seconds(c_events)[0] / 3) < 1e-9)
+        check('pacecheck: roles fixed (MAYA tells both segments, ALEX learns)',
+              [(s['teller'], s['listener']) for s in pc['segments']] == [('MAYA', 'ALEX'), ('MAYA', 'ALEX')])
+        check('pacecheck: one sound counted, in segment 1', pc['nonlexical'] == 1 and pc['sounds'] == {'hmm': 1}
+              and [s['nonlexical'] for s in pc['segments']] == [1, 0])
+        check('pacecheck: the timeline (via plan_assembly) adds up to estimate_seconds()',
+              abs(sum(t[2] for t in _pace_timeline(c_events, c_chapters)) - estimate_seconds(c_events)[0]) < 1e-6)
+
+        # Metric fixture: exact numbers.
+        _, (m_events, m_chapters) = pace_parse('metrics.txt',
+            'MAYA: One two three. Four five six seven eight nine ten.\n'      # 10 words, sentences 3 + 7
+            'MAYA: Eleven twelve... thirteen?\n'                               # 3 words, one sentence
+            '[pause 2]\n'
+            'ALEX: Uh-huh, ha. [pause 0.5] Twenty percent of 40 hives.\n'     # 8 words, sounds uh-huh + ha
+            '---\n'
+            'ALEX: Fine.\n')                                                   # 1 word, new segment
+        pc = pacecheck(m_events, m_chapters)
+        # sentences: 3 | 7 | "Eleven twelve... thirteen?" 3 | "Uh-huh, ha." 2 | 5 | "Fine." 1
+        check('pacecheck: sentence share (5 of 6 sentences are <= 6 words; "..." is not an end)',
+              pc['sentences'] == 6 and abs(pc['short_share'] - 5 / 6) < 1e-9)
+        import statistics
+        check('pacecheck: avg and sd of words per line', abs(pc['avg_words'] - (10 + 3 + 7 + 1) / 4) < 1e-9
+              and abs(pc['sd_words'] - statistics.pstdev([10, 3, 7, 1])) < 1e-9)
+        check('pacecheck: longest pause-free stretch = speech + turn gaps before the [pause 2]',
+              abs(pc['longest_pause_free'][0] - (_ref_speech(10, 3) + TURN_GAP)) < 1e-9)
+        check('pacecheck: longest run is MAYA, 13 words, from event 0', pc['longest_run'] == ('MAYA', 13, 0))
+        check('pacecheck: "uh-huh" counts once (not also as "huh"), "ha" counts',
+              pc['sounds'] == {'uh-huh': 1, 'ha': 1})
+        check('pacecheck: figures/min counts number words and digits',
+              abs(pc['figures_per_min'] - 12 / (estimate_seconds(m_events)[0] / 60.0)) < 1e-9)
+        check('pacecheck: a script with no chapters still splits at --- (2 segments)', len(pc['segments']) == 2)
+        check('pacecheck: no sound list (bare checkout) counts nothing',
+              pacecheck(m_events, m_chapters, nonlexical={})['nonlexical'] == 0)
+
+        # One fixture per warning kind.
+        long_para = ' '.join([LONG] * 8)  # 104 words, ~40 s
+        _, (e, ch) = pace_parse('nopause_rate.txt', f'MAYA: {long_para}\nALEX: {long_para}\nMAYA: {long_para}\n')
+        check('NO_PAUSE: no pause over > 90 s warns (rate)', 'NO_PAUSE' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('nopause_stretch.txt',
+                                '[pause 1]\n[pause 1]\n[pause 1]\n'
+                                + ''.join(f'{"MAYA" if k % 2 else "ALEX"}: {long_para}\n' for k in range(5))
+                                + '[pause 1]\n' * 3)
+        pc = pacecheck(e, ch)
+        check('NO_PAUSE: a 3+ min pause-free stretch warns even when the rate is fine',
+              pc['secs_per_pause'] <= PAUSE_EVERY_SECS and 'NO_PAUSE' in kinds(pc))
+        _, (e, ch) = pace_parse('longrun.txt', f'MAYA: {LONG} [pause 1] {long_para}\nALEX: {SHORT}\n')
+        check('LONG_RUN: one speaker over 90 words warns', 'LONG_RUN' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('solo.txt', f'MAYA: {LONG} [pause 1] {long_para}\n')
+        check('LONG_RUN: a one-voice script is exempt', 'LONG_RUN' not in kinds(pacecheck(e, ch)))
+        n_min = FLAT_LINES_MIN_SENTENCES
+        _, (e, ch) = pace_parse('flat.txt', ''.join(f'[pause 1]\n{"MAYA" if k % 2 else "ALEX"}: {LONG}\n'
+                                                    for k in range(n_min)))
+        check('FLAT_LINES: no short sentences warns', 'FLAT_LINES' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('choppy.txt', ''.join(f'[pause 1]\n{"MAYA" if k % 2 else "ALEX"}: {SHORT}\n'
+                                                      for k in range(n_min)))
+        check('FLAT_LINES: all short sentences warns too', 'FLAT_LINES' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('tiny.txt', ''.join(f'[pause 1]\n{"MAYA" if k % 2 else "ALEX"}: {LONG}\n'
+                                                    for k in range(n_min - 1)))
+        check('FLAT_LINES: fewer than FLAT_LINES_MIN_SENTENCES sentences is not judged',
+              'FLAT_LINES' not in kinds(pacecheck(e, ch)))
+        # Per segment: a flat second segment warns by name even when the episode share is fine.
+        mixed = (''.join(f'[pause 1]\nMAYA: {SHORT} {SHORT}\nALEX: {LONG}\n' for _ in range(n_min // 2))
+                 + '---\n# ── 2. Drones ──\n'
+                 + ''.join(f'[pause 1]\n{"MAYA" if k % 2 else "ALEX"}: {LONG}\n' for k in range(n_min)))
+        _, (e, ch) = pace_parse('flatseg.txt', mixed)
+        pc = pacecheck(e, ch)
+        check('FLAT_LINES: judged per segment, naming the flat one',
+              [m for k, m in pc['warnings'] if k == 'FLAT_LINES'] ==
+              [f'segment 2 "2. Drones": 0% of {n_min} sentences are {SHORT_SENTENCE_WORDS} words or fewer '
+               f'(aim for {FLAT_LINES_BAND[0]:.0%}-{FLAT_LINES_BAND[1]:.0%})'])
+        # TELLER_CHANGED: two-host roles are fixed. Episodes of cold open, three body segments and a wrap.
+        def roles_seg(n, title, teller, learner=None):
+            head = [f'# ── {n}. {title} ──']
+            if teller is None:  # roles unclear: two equal turns, no question, no short turn
+                return head + [f'MAYA: {LONG}', f'ALEX: {LONG}', '[pause 1]', '---']
+            return head + [f'{learner}: Why do the bees huddle up in winter?', f'{teller}: {SHORT} {SHORT} {LONG}',
+                           '[pause 1]', f'{learner}: So the middle stays warm?', f'{teller}: {SHORT} {LONG}', '---']
+
+        def roles_ep(name, tellers, cold='ALEX', wrap='ALEX'):
+            hosts = {'MAYA': 'ALEX', 'ALEX': 'MAYA'}
+            segs = [roles_seg(1, 'Cold open', cold, hosts[cold])]
+            segs += [roles_seg(k + 2, f'Part {k + 1}', t, hosts.get(t)) for k, t in enumerate(tellers)]
+            segs += [roles_seg(len(tellers) + 2, 'Wrap', wrap, hosts[wrap])]
+            text = '\n'.join(line for seg in segs for line in seg) + '\n'
+            return pacecheck(*pace_parse(name, text)[1]), text
+
+        changed = lambda pc: [m for k, m in pc['warnings'] if k == 'TELLER_CHANGED']
+        pc, _ = roles_ep('fixedroles.txt', ['MAYA', 'MAYA', 'MAYA'])
+        check('TELLER_CHANGED: fixed roles are clean, though ALEX tells the cold open and the wrap',
+              [s['teller'] for s in pc['segments']] == ['ALEX', 'MAYA', 'MAYA', 'MAYA', 'ALEX']
+              and pc['warnings'] == [])
+        pc, swap_text = roles_ep('swaproles.txt', ['MAYA', 'ALEX', 'MAYA'])
+        check('TELLER_CHANGED: a teller swap every segment warns on the odd one out, by name',
+              [s['teller'] for s in pc['segments']] == ['ALEX', 'MAYA', 'ALEX', 'MAYA', 'ALEX'] and changed(pc) ==
+              ['segment 3 "3. Part 2": ALEX tells, but MAYA tells 2 of 3 body segments; keep one teller all episode'])
+        pc, _ = roles_ep('unclearroles.txt', ['MAYA', None, 'ALEX'])
+        check('TELLER_CHANGED: a "roles unclear" segment is neither judged nor counted (a 1-1 tie goes to the earliest)',
+              pc['segments'][2]['teller'] is None and changed(pc) ==
+              ['segment 4 "4. Part 3": ALEX tells, but MAYA tells 1 of 2 body segments; keep one teller all episode'])
+        pc, _ = roles_ep('unclearonly.txt', ['MAYA', None, 'MAYA'])
+        check('TELLER_CHANGED: fixed roles around a "roles unclear" segment stay clean',
+              pc['segments'][2]['teller'] is None and changed(pc) == [])
+        # On a three-voice panel the guests take turns telling by design: never judged.
+        panel = swap_text.replace('ALEX: Why do the bees', 'IRIS: Why does this matter? \nALEX: Why do the bees')
+        with open(os.path.join(ptd, 'panelteller.txt'), 'w', encoding='utf-8') as f:
+            f.write(panel)
+        pc = pacecheck(*parse_script(os.path.join(ptd, 'panelteller.txt'), {**voices, 'IRIS': 'af_bella'}, *no_lex))
+        check('TELLER_CHANGED: not judged on a three-voice script',
+              panel.count('IRIS:') >= 2 and [s['teller'] for s in pc['segments']][1:4] == ['MAYA', 'ALEX', 'MAYA']
+              and 'TELLER_CHANGED' not in kinds(pc))
+        _, (e, ch) = pace_parse('alone.txt', clean_text.replace('ALEX: Hmm. [pause 0.6] So the', 'ALEX: Hmm.\nALEX: So the'))
+        check('NONLEXICAL_ALONE: a sound on its own line warns', 'NONLEXICAL_ALONE' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('alone2.txt', clean_text.replace('[pause 0.6] So the', '[pause 0.6] Huh.\nALEX: So the'))
+        check('NONLEXICAL_ALONE: sounds split only by an inline pause still warn',
+              'NONLEXICAL_ALONE' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('many.txt', clean_text.replace('Why do the bees', 'Huh. Why do the bees'))
+        check('NONLEXICAL_MANY: two sounds in one segment warns', 'NONLEXICAL_MANY' in kinds(pacecheck(e, ch)))
+        check('pacecheck: warning kinds come from the fixed list', set(PACE_KINDS) == {
+            'NO_PAUSE', 'LONG_RUN', 'FLAT_LINES', 'TELLER_CHANGED', 'NONLEXICAL_ALONE', 'NONLEXICAL_MANY',
+            'BANNED_SOUND'})
+
+        # A paced segment followed by an unpaced one, inside one episode: the episode rate
+        # is fine, but segment 2 (> 90 s, no pause) must still warn, by name.
+        paced = ''.join(f'[pause 1]\n{"MAYA" if k % 2 else "ALEX"}: {LONG}\n' for k in range(24))
+        combo = ('# ── 1. Winter ──\n' + paced + '---\n# ── 2. Swarming ──\n'
+                 + ''.join(f'{"MAYA" if k % 2 else "ALEX"}: {LONG}\n' for k in range(24)))
+        _, (e, ch) = pace_parse('combo.txt', combo)
+        pc = pacecheck(e, ch)
+        check('NO_PAUSE: an unpaced segment inside a paced episode warns, naming segment 2',
+              pc['secs_per_pause'] <= PAUSE_EVERY_SECS and pc['segments'][1]['secs'] > PAUSE_EVERY_SECS
+              and pc['segments'][1]['longest_pause_free'] <= MAX_PAUSE_FREE_SECS
+              and [m.split(':')[0] for k, m in pc['warnings'] if k == 'NO_PAUSE'] == ['segment 2 "2. Swarming"'])
+        check('pacecheck: a closing --- divider is not counted as pause-free speech',
+              abs(pc['segments'][0]['longest_pause_free'] - _ref_speech(13)) < 1e-9)
+
+        # Roles are scored per TURN: a teller writing one short sentence per line is still the teller.
+        _, (e, ch) = pace_parse('turns.txt',
+            'ALEX: Why do the bees huddle up so close in the winter?\n'
+            + f'MAYA: {SHORT}\n' * 6
+            + 'ALEX: And how do they keep the queen warm through it all?\n'
+            + f'MAYA: {SHORT}\n' * 3)
+        pc = pacecheck(e, ch)
+        check('roles: consecutive one-sentence lines merge into one turn (MAYA tells)',
+              (pc['segments'][0]['teller'], pc['segments'][0]['listener']) == ('MAYA', 'ALEX'))
+        # Short turns alone (no "?") mark the listener.
+        _, (e, ch) = pace_parse('shortturns.txt', f'MAYA: {LONG}\nALEX: Right.\nMAYA: {LONG}\n'
+                                                  f'ALEX: Okay, go on.\nMAYA: {LONG}\n')
+        pc = pacecheck(e, ch)
+        check('roles: short turns count toward the listener without any "?"',
+              (pc['segments'][0]['teller'], pc['segments'][0]['listener']) == ('MAYA', 'ALEX'))
+        # Three voices: a tie at the top means no listener, a unique bottom is still the teller.
+        voices3 = dict(voices, JO='af_bella')
+        p3 = os.path.join(ptd, 'panel.txt')
+        with open(p3, 'w', encoding='utf-8') as f:
+            f.write(f'MAYA: {LONG}\nALEX: Why though?\nMAYA: {LONG}\nJO: Why?\n')
+        pc = pacecheck(*parse_script(p3, voices3, *no_lex))
+        check('roles: a tie for listener gives no listener; the unique teller stays',
+              (pc['segments'][0]['teller'], pc['segments'][0]['listener']) == ('MAYA', None))
+        # Runs end at a segment boundary.
+        half = ' '.join([LONG] * 4)  # 52 words
+        _, (e, ch) = pace_parse('runseg.txt', f'ALEX: {SHORT}\nMAYA: {half}\n---\nMAYA: {half}\nALEX: {SHORT}\n')
+        pc = pacecheck(e, ch)
+        check('LONG_RUN: a run does not continue across a segment boundary',
+              pc['longest_run'][:2] == ('MAYA', 52) and 'LONG_RUN' not in kinds(pc))
+        # Warnings are ordered by kind (PACE_KINDS), not by when they were found.
+        _, (e, ch) = pace_parse('order.txt', 'ALEX: Hmm.\n' + ''.join(
+            f'{"MAYA" if k % 2 else "ALEX"}: {LONG}\n' for k in range(30)))
+        ks = kinds(pacecheck(e, ch))
+        check('pacecheck: warnings sorted by kind (NO_PAUSE before NONLEXICAL_ALONE)',
+              ks[0] == 'NO_PAUSE' and 'NONLEXICAL_ALONE' in ks
+              and ks == sorted(ks, key=PACE_KINDS.index))
+        # Sounds: a repeat is one sound; every m-spelling of "mm-hm" is BANNED_SOUND.
+        snd = {'ha': [], 'huh': [], 'uh-huh': []}
+        check('find_sounds: "Ha-ha" is one sound', find_sounds('Ha-ha. So?', snd)[0] == ['ha'])
+        check('find_sounds: "ha ha" is one sound', find_sounds('Ha ha, so?', snd)[0] == ['ha'])
+        check('find_sounds: "uh-huh" is not also a "huh"', find_sounds('Uh-huh. Huh.', snd)[0] == ['uh-huh', 'huh'])
+        for bad in ('Mm-hm', 'Mhm', 'Mmhmm', 'Mm'):
+            _, (e, ch) = pace_parse('banned.txt', f'[pause 1]\nMAYA: {LONG}\nALEX: {bad}. So the cluster stays warm?\n')
+            check(f'BANNED_SOUND: {bad!r} warns', 'BANNED_SOUND' in kinds(pacecheck(e, ch)))
+        _, (e, ch) = pace_parse('notbanned.txt', f'[pause 1]\nMAYA: {LONG}\nALEX: Hmm. Mmm-good honey, hmm?\n')
+        check('BANNED_SOUND: "hmm" and an "mm" inside a word do not warn',
+              'BANNED_SOUND' not in kinds(pacecheck(e, ch)))
+
+        # CLI: --dry-run --strict exits 4 on a warning, 0 when clean; --strict alone is bad input.
+        def run_cli(path, *extra):
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), path, '--dry-run',
+                                '--voices', 'MAYA=af_heart,ALEX=am_michael', *extra],
+                               capture_output=True, text=True, encoding='utf-8')
+            return r.returncode, r.stdout
+        code, out = run_cli(os.path.join(ptd, 'nopause_rate.txt'), '--strict')
+        check('--dry-run --strict exits 4 on a NO_PAUSE fixture', code == STRICT_EXIT == 4 and '⚠ NO_PAUSE:' in out)
+        code, out = run_cli(os.path.join(ptd, 'nopause_rate.txt'))
+        check('--dry-run without --strict still exits 0 and prints the warning', code == 0 and '⚠ NO_PAUSE:' in out)
+        code, out = run_cli(os.path.join(ptd, 'clean.txt'), '--strict')
+        check('--dry-run --strict exits 0 on the clean fixture', code == 0 and out.count('\npacecheck  ') == 1
+              and '⚠' not in out)
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), os.path.join(ptd, 'clean.txt'),
+                            os.path.join(ptd, 'x.mp3'), '--strict'], capture_output=True, text=True)
+        check('--strict without --dry-run is bad input (exit 2), never 3', r.returncode == 2)
+        probe = ("import runpy, sys\n"
+                 f"sys.argv = [{os.path.abspath(__file__)!r}, {os.path.join(ptd, 'clean.txt')!r}, '--dry-run', '--strict']\n"
+                 "try:\n    runpy.run_path(sys.argv[0], run_name='__main__')\nexcept SystemExit:\n    pass\n"
+                 "print(sorted(m for m in ('numpy', 'soundfile', 'kokoro', 'kokoro_onnx', 'onnxruntime',"
+                 " 'torch', 'piper') if m in sys.modules))\n")
+        r = subprocess.run([sys.executable, '-c', probe], capture_output=True, text=True, encoding='utf-8')
+        check('--dry-run (with pacecheck) imports no engine, numpy or soundfile',
+              r.returncode == 0 and r.stdout.strip().endswith('[]'))
+
     return 0 if ok else 1
 
 
@@ -1802,6 +2985,21 @@ def maybe_reexec_into_venv(engine_id):
     os.execve(target, [target] + sys.argv, env)  # pragma: no cover (replaces process)
 
 
+def resolve_pacing(cli_pacing, which_config=_UNSET):
+    """--pacing > config.load()['default_pacing']. Without config.py (a bare checkout) the
+    default is brisk, i.e. 0.2.0's timing. A bad configured value exits 2 naming the set."""
+    if cli_pacing:
+        return cli_pacing
+    cfg = config if which_config is _UNSET else which_config
+    if cfg is None:
+        return 'brisk'
+    pacing = cfg.load().get('default_pacing', 'relaxed')
+    if pacing not in PACINGS:
+        die(f'default_pacing {pacing!r} is not one of {", ".join(PACINGS)} '
+            f'(fix: config.py set default_pacing=relaxed)', 2)
+    return pacing
+
+
 def main():
     ap = build_arg_parser()
     args = ap.parse_args()
@@ -1811,6 +3009,11 @@ def main():
 
     if not args.script:
         ap.error('the following arguments are required: script')
+    if args.strict and not args.dry_run:
+        ap.error('--strict only applies to --dry-run (pacecheck)')
+    if not os.path.isfile(args.script):
+        die(f'{args.script}: script file not found', 2)
+    pacing = resolve_pacing(args.pacing)
 
     if args.dry_run:
         # No real engine is resolved for a dry run: every engine's default table
@@ -1845,20 +3048,26 @@ def main():
     lexicon_explicit = args.lexicon is not None
     lexicon_path = args.lexicon if lexicon_explicit else default_lexicon_path(args.script)
     pattern, rules = load_lexicon(lexicon_path, explicit=lexicon_explicit)
-    events, chapters = parse_script(args.script, voices, pattern, rules)
+    episode = Episode(args.script, voices, pattern, rules, pacing)
+    events, chapters = episode.events, episode.chapters
 
     if args.dry_run:
-        total, starts = estimate_seconds(events)
+        total, starts = episode.estimate()
         say_lines = [e for e in events if e[0] == 'say']
         word_count = sum(len(e[3].split()) for e in say_lines)
         print(f'{len(say_lines)} dialogue lines, {word_count} spoken words')
-        print(f'estimated duration: {fmt_mmss(total)} ({total / 60:.1f} min) at {WPM} wpm + gaps')
+        print(f'estimated duration: {fmt_mmss(total)} ({total / 60:.1f} min) at {WPM} wpm, {CHUNK_OVERHEAD:+.2f} s per chunk, + gaps '
+              f'({pacing} pacing)')
         if chapters:
             print('chapters:')
             for title, idx in chapters:
                 print(f'  {fmt_mmss(starts[idx])}  {title}')
         else:
             print('chapters: none')
+        pc = episode.pacecheck()
+        print_pacecheck(pc)
+        if args.strict and pc['warnings']:
+            sys.exit(STRICT_EXIT)
         return
 
     # If this interpreter can't satisfy what's about to be imported but the
@@ -1939,31 +3148,24 @@ def main():
         write_cache_atomic(path, audio)
         return audio
 
-    parts, said = [], 0
-    chapter_records = []
-    chapter_ptr = 0
-    t = 0.0
-    for i, ev in enumerate(events):
-        while chapter_ptr < len(chapters) and chapters[chapter_ptr][1] == i:
-            chapter_records.append({'title': chapters[chapter_ptr][0], 'start': t})
-            chapter_ptr += 1
-        if ev[0] == 'pause':
-            parts.append(np.zeros(int(ev[1] * sr), dtype=np.float32))
-            t += ev[1]
-            continue
-        audio = say(ev[1], ev[3])
-        parts.append(audio)
-        t += len(audio) / sr
+    # plan_assembly() lays out the timeline (selftested without an engine); synthesis
+    # happens in its duration callback, and the ops are then executed in order.
+    chunk_audio = {}
+    said = 0
+
+    def chunk_seconds(speaker, spoken_text):
+        audio = say(speaker, spoken_text)
+        chunk_audio[(speaker, spoken_text)] = audio
+        return len(audio) / sr
+
+    def progress():
+        nonlocal said
         said += 1
-        nxt = events[i + 1] if i + 1 < len(events) else None
-        if nxt and nxt[0] == 'say':
-            parts.append(np.zeros(int(TURN_GAP * sr), dtype=np.float32))
-            t += TURN_GAP
         print(f'\r  {said} lines', end='', flush=True)
 
-    while chapter_ptr < len(chapters):
-        chapter_records.append({'title': chapters[chapter_ptr][0], 'start': t})
-        chapter_ptr += 1
+    ops, chapter_records = episode.plan(chunk_seconds, progress)
+    parts = [chunk_audio[(op[1], op[2])] if op[0] == 'say'
+             else np.zeros(int(op[1] * sr), dtype=np.float32) for op in ops]
 
     audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
     wav = os.path.splitext(args.out)[0] + '.wav'
@@ -1995,7 +3197,7 @@ def main():
     cast_note = f', cast {os.path.basename(args.cast)}' if args.cast else ''
     pace_note = ('  pace: ' + ', '.join(f'{sp} {sd:g}x' for sp, sd in sorted(paced.items()))) if paced else ''
     print(f'✓ {args.out}  {duration / 60:.1f} min, {said} lines, '
-          f'{len(chapter_records)} chapters  ({engine.name}, {sr} Hz{cast_note}){pace_note}')
+          f'{len(chapter_records)} chapters  ({engine.name}, {sr} Hz, {pacing} pacing{cast_note}){pace_note}')
 
 
 if __name__ == '__main__':

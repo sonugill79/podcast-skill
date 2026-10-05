@@ -45,6 +45,65 @@ import time
 
 APP_NAME = "topic-podcast"
 
+# Script syntax shared by render.py (which splits the line and inserts silence) and
+# qa.py (which strips the token so it expects only the spoken words): an inline pause
+# inside a speaker line, e.g. "ALEX: Wait. [pause 0.8] So the diagram is just wrong?".
+# One definition here, so the two parsers can't drift (docs/ops/phase-gates-addendum.md).
+# PAUSE_TOKEN_RE finds a pause directive, well-formed or not, so a typo is rejected
+# instead of being spoken. It must carry a number: a literal "[pause]" or
+# "[pause-button]" in dialogue is just words. INLINE_PAUSE_RE is the valid form, with
+# the same number syntax as the whole-line `[pause N]` directive (ASCII digits only).
+PAUSE_TOKEN_RE = re.compile(r'\[\s*pause\b[^\]\d]*\d[^\]]*\]?', re.IGNORECASE | re.ASCII)
+INLINE_PAUSE_RE = re.compile(r'\[pause ([\d.]+)\]', re.ASCII)
+INLINE_PAUSE_MAX = 10.0
+
+
+def split_inline_pauses(text):
+    """Split a speaker line's text on inline `[pause N]` tokens.
+
+    Returns [('text', chunk) | ('pause', seconds), ...] in order, text chunks stripped
+    and empty ones dropped. Raises ValueError (message names the bad token) for a
+    malformed token, N <= 0, N > INLINE_PAUSE_MAX, a text chunk with no word character
+    (e.g. the "." in "Wait. [pause 1] ."), or a line with no words at all."""
+    segments, pos = [], 0
+    for m in PAUSE_TOKEN_RE.finditer(text):
+        chunk = text[pos:m.start()].strip()
+        if chunk:
+            segments.append(('text', chunk))
+        pos = m.end()
+        token = m.group(0)
+        valid = INLINE_PAUSE_RE.fullmatch(token)
+        try:
+            secs = float(valid.group(1)) if valid else None
+        except ValueError:
+            secs = None
+        if secs is None:
+            raise ValueError(f'malformed inline pause {token!r} (expected [pause N], N in seconds)')
+        if not 0 < secs <= INLINE_PAUSE_MAX:
+            raise ValueError(f'inline pause {token!r} out of range (0 < N <= {INLINE_PAUSE_MAX:g})')
+        segments.append(('pause', secs))
+    chunk = text[pos:].strip()
+    if chunk:
+        segments.append(('text', chunk))
+    if not any(kind == 'text' for kind, _ in segments):
+        raise ValueError('speaker line has no words besides its pauses')
+    for kind, val in segments:
+        if kind == 'text' and not re.search(r'\w', val):
+            raise ValueError(f'text {val!r} between pauses has no words (move it into a neighbouring chunk)')
+    return segments
+
+
+def strip_inline_pauses(text):
+    """The spoken words of a speaker line: every pause token removed, whitespace closed up."""
+    return ' '.join(PAUSE_TOKEN_RE.sub(' ', text).split())
+
+# Non-lexical reactions: qa.py treats them as optional, render.py's pacecheck counts
+# them (at most one per segment, never a line on its own). Keys are what a script
+# says; values are what whisper has been seen to hear instead (probe, 2026-10-03:
+# "hmm" -> "him"). "mm-hm" is deliberately absent: Kokoro spells it out as letters.
+NONLEXICAL = {"hmm": ["him", "hm", "mm"], "uh-huh": ["uh huh", "uhhuh"],
+              "huh": ["hi"], "ha": ["ha ha", "hah"]}
+
 DEFAULTS = {
     "episodes_dir": "~/podcast-episodes",
     "voice_engine": "auto",
@@ -54,6 +113,14 @@ DEFAULTS = {
     # Which cast (casts/<name>.md) an episode uses when the request doesn't name one.
     # The `debate` angle overrides it with `panel`, which is the cast it is written for.
     "default_cast": "two-host",
+    # How long the silences are (render.py GAPS). brisk: 0.2.0's fixed gaps, audio-identical
+    # to it. relaxed: a short beat after every sentence and a longer one when the speaker
+    # changes (the timing the listener approved by ear). spacious: longer still.
+    "default_pacing": "relaxed",
+    # How much the listener already knows (brief.md `level:`; each angle's `## Level notes`).
+    # intro: every term explained. informed: the basics assumed, today's pitch. expert: the
+    # field assumed, nothing standard explained. Changes the pitch, never the verification.
+    "default_level": "informed",
     # Voice ids the listener never wants to hear again, comma-separated. Dropped from
     # every cast's rotation pool. "I don't like that voice" is a standing preference,
     # not a per-episode flag, and it should hold across every cast.
@@ -76,6 +143,8 @@ ENV_OVERRIDES = {
     "PODCAST_TELEGRAM_BOT": "telegram_bot",
     "PODCAST_LISTENER_PROFILE": "listener_profile",
     "PODCAST_DEFAULT_CAST": "default_cast",
+    "PODCAST_DEFAULT_PACING": "default_pacing",
+    "PODCAST_DEFAULT_LEVEL": "default_level",
     "PODCAST_VOICE_BLOCKLIST": "voice_blocklist",
     "PODCAST_AUTO_SETUP": "auto_setup",
 }
@@ -85,8 +154,23 @@ ENV_OVERRIDES = {
 VOICE_LEVELS = ["none", "piper", "kokoro"]
 QA_LEVELS = ["none", "base", "small", "medium"]
 AUTO_SETUP_LEVELS = ["always", "audio-only", "never"]
+# render.py's GAPS table has one row per pacing, in this order; its selftest checks they match.
+PACINGS = ["brisk", "relaxed", "spacious"]
+# The listener's level, least to most assumed knowledge. Read by the model (SKILL.md), not a script.
+LEVELS = ["intro", "informed", "expert"]
 ENUM_CHOICES = {"voice_engine": ["auto"] + VOICE_LEVELS, "qa_level": ["auto"] + QA_LEVELS,
-                 "auto_setup": AUTO_SETUP_LEVELS}
+                 "auto_setup": AUTO_SETUP_LEVELS, "default_pacing": PACINGS, "default_level": LEVELS}
+
+
+
+def normalise_enum(key, val):
+    """An enum setting's value as compared with ENUM_CHOICES: stripped and lowercased, so
+    " Brisk" from an env var or an install prompt means brisk. Other settings (paths,
+    names) are returned untouched."""
+    if key in ENUM_CHOICES and isinstance(val, str):
+        return val.strip().lower()
+    return val
+
 
 VOICE_LABELS = {"piper": "fast, smaller download", "kokoro": "best quality"}
 
@@ -309,6 +393,7 @@ def _apply_known_settings(cfg, updates, source_label):
             print(f"warning: {source_label} value for {k!r} is not a string ({v!r}) -- ignoring",
                   file=sys.stderr)
             continue
+        v = normalise_enum(k, v)
         choices = ENUM_CHOICES.get(k)
         if choices and v not in choices:
             print(f"warning: {source_label} {k}={v!r} is not one of {', '.join(choices)} -- "
@@ -325,11 +410,20 @@ def load():
     file_cfg = _read_config_file()
     for k, v in file_cfg.items():
         if k in DEFAULTS:
+            # A bad enum in the file (hand-edited, or from a newer/older version) is
+            # treated like a bad env var or install option: warn, keep what we had.
+            v = normalise_enum(k, v)
+            choices = ENUM_CHOICES.get(k)
+            if choices and v not in choices:
+                print(f"warning: config file {k}={v!r} is not one of {', '.join(choices)} -- "
+                      f"ignoring it, using {cfg[k]!r}", file=sys.stderr)
+                continue
             cfg[k] = v
     for env_name, key in ENV_OVERRIDES.items():
         val = os.environ.get(env_name)
-        if not val:
+        if not val or not val.strip():
             continue
+        val = normalise_enum(key, val)
         choices = ENUM_CHOICES.get(key)
         if choices and val not in choices:
             # e.g. PODCAST_VOICE_ENGINE=pipr (typo) must not silently resolve as if
@@ -1095,6 +1189,33 @@ def run_selftest():
         if not cond:
             ok[0] = False
 
+    # NONLEXICAL: the shared sound list (render.py pacecheck, qa.py).
+    check("NONLEXICAL keys are lower-case sounds, values are lists of strings",
+          all(k == k.lower() and re.fullmatch(r"[a-z]+(-[a-z]+)?", k)
+              and isinstance(v, list) and all(isinstance(x, str) for x in v)
+              for k, v in NONLEXICAL.items()))
+    check("NONLEXICAL holds hmm, uh-huh, huh and ha", set(NONLEXICAL) == {"hmm", "uh-huh", "huh", "ha"})
+    check("NONLEXICAL has no mm-hm in any spelling (Kokoro spells it as letters)",
+          not any(re.fullmatch(r"m+[- ]?h?m+", k) for k in NONLEXICAL))
+    check('NONLEXICAL: "hmm" may be heard as "him"', "him" in NONLEXICAL["hmm"])
+    check("NONLEXICAL: no sound lists itself as a mishearing",
+          all(k not in v for k, v in NONLEXICAL.items()))
+
+    # plugin.json userConfig and DEFAULTS describe the same settings; a default that differs, or
+    # an enum default outside ENUM_CHOICES, means the install prompt and the fallback disagree.
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+                            ".claude-plugin", "plugin.json")
+    if os.path.isfile(manifest):
+        with open(manifest, encoding="utf-8") as f:
+            user_cfg = json.load(f).get("userConfig", {})
+        mismatched = sorted(k for k, opt in user_cfg.items()
+                            if k not in DEFAULTS or opt.get("default") != DEFAULTS[k]
+                            or (k in ENUM_CHOICES and opt.get("default") not in ENUM_CHOICES[k]))
+        check(f"plugin.json userConfig defaults match DEFAULTS and ENUM_CHOICES ({mismatched or 'all match'})",
+              bool(user_cfg) and not mismatched)
+    else:
+        print("SKIP  plugin.json userConfig vs DEFAULTS (no plugin.json beside this checkout)")
+
     tracked_env = list(ENV_OVERRIDES) + [
         "PODCAST_CONFIG", "PODCAST_STATE_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
         "CLAUDE_CONFIG_DIR",
@@ -1230,6 +1351,124 @@ def run_selftest():
             finally:
                 del os.environ["PODCAST_DEFAULT_CAST"]
             check("env leaves other file keys alone (qa_level)", cfg["qa_level"] == "base")
+
+            # -- default_pacing (3.1): an enum, overridable by env; empty env is not an override --
+            check("defaults: default_pacing is relaxed", DEFAULTS["default_pacing"] == "relaxed"
+                  and load()["default_pacing"] == "relaxed")
+            check("default_pacing choices are brisk, relaxed, spacious",
+                  ENUM_CHOICES.get("default_pacing") == ["brisk", "relaxed", "spacious"] == PACINGS)
+            check("PODCAST_DEFAULT_PACING maps to default_pacing",
+                  ENV_OVERRIDES.get("PODCAST_DEFAULT_PACING") == "default_pacing")
+            try:
+                os.environ["PODCAST_DEFAULT_PACING"] = "spacious"
+                check("env overrides default (default_pacing)", load()["default_pacing"] == "spacious")
+                os.environ["PODCAST_DEFAULT_PACING"] = ""
+                check("empty PODCAST_DEFAULT_PACING does NOT override", load()["default_pacing"] == "relaxed")
+                os.environ["PODCAST_DEFAULT_PACING"] = "fast"
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    bad = load()["default_pacing"]
+                check("invalid PODCAST_DEFAULT_PACING warns and keeps relaxed",
+                      bad == "relaxed" and "brisk, relaxed, spacious" in err.getvalue())
+            finally:
+                os.environ.pop("PODCAST_DEFAULT_PACING", None)
+            set_env = dict(os.environ, PODCAST_CONFIG=os.path.join(td, "set-pacing.json"))
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", "default_pacing=fast"],
+                               capture_output=True, text=True, env=set_env)
+            check("set default_pacing=fast exits 2 naming brisk, relaxed, spacious",
+                  r.returncode == 2 and "brisk, relaxed, spacious" in r.stderr
+                  and not os.path.exists(set_env["PODCAST_CONFIG"]))
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", "default_pacing=brisk"],
+                               capture_output=True, text=True, env=set_env)
+            check("set default_pacing=brisk persists (the rollback switch)",
+                  r.returncode == 0 and json.loads(r.stdout)["default_pacing"] == "brisk")
+            bad_set = {"unknown key": ["set", "no_such_key=1"], "malformed key=value": ["set", "default_pacing"],
+                       "no arguments": ["set"]}
+            codes = {k: subprocess.run([sys.executable, os.path.abspath(__file__), *a], capture_output=True,
+                                       text=True, env=set_env).returncode for k, a in bad_set.items()}
+            check("set: unknown key, malformed key=value and no arguments all exit 2 (bad input)",
+                  codes == {k: 2 for k in bad_set})
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", "default_pacing= Spacious "],
+                               capture_output=True, text=True, env=set_env)
+            check("set normalises an enum value (' Spacious ' -> spacious)",
+                  r.returncode == 0 and json.loads(r.stdout)["default_pacing"] == "spacious")
+            try:
+                os.environ["PODCAST_DEFAULT_PACING"] = " Brisk "
+                check("env enum value is normalised (' Brisk ' -> brisk)", load()["default_pacing"] == "brisk")
+                os.environ["PODCAST_DEFAULT_PACING"] = "   "
+                os.environ["PODCAST_TELEGRAM_BOT"] = "   "
+                check("whitespace-only env var does NOT override (enum or free text)",
+                      load()["default_pacing"] == "relaxed" and load()["telegram_bot"] == "")
+            finally:
+                os.environ.pop("PODCAST_DEFAULT_PACING", None)
+                os.environ.pop("PODCAST_TELEGRAM_BOT", None)
+            norm_cfg = dict(DEFAULTS)
+            with contextlib.redirect_stderr(io.StringIO()):
+                _apply_known_settings(norm_cfg, {"default_pacing": "SPACIOUS", "qa_level": "nope"}, "test option")
+            check("install option enum is normalised; an invalid one is ignored",
+                  norm_cfg["default_pacing"] == "spacious" and norm_cfg["qa_level"] == DEFAULTS["qa_level"])
+            with open(cfg_path, encoding="utf-8") as f:
+                kept_file = f.read()
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(dict(json.loads(kept_file), default_pacing="fast"), f)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                file_pacing = load()["default_pacing"]
+            check("config file with default_pacing=fast warns and keeps relaxed (same as env/option)",
+                  file_pacing == "relaxed" and "brisk, relaxed, spacious" in err.getvalue())
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(kept_file)
+            # -- default_level (5.1): an enum like default_pacing; informed is today's pitch --
+            check("defaults: default_level is informed", DEFAULTS["default_level"] == "informed"
+                  and load()["default_level"] == "informed")
+            check("default_level choices are intro, informed, expert",
+                  ENUM_CHOICES.get("default_level") == ["intro", "informed", "expert"] == LEVELS)
+            check("PODCAST_DEFAULT_LEVEL maps to default_level",
+                  ENV_OVERRIDES.get("PODCAST_DEFAULT_LEVEL") == "default_level")
+            try:
+                os.environ["PODCAST_DEFAULT_LEVEL"] = "expert"
+                check("env overrides default (default_level)", load()["default_level"] == "expert")
+                os.environ["PODCAST_DEFAULT_LEVEL"] = " Intro "
+                check("env level is normalised (' Intro ' -> intro)", load()["default_level"] == "intro")
+                os.environ["PODCAST_DEFAULT_LEVEL"] = ""
+                check("empty PODCAST_DEFAULT_LEVEL does NOT override", load()["default_level"] == "informed")
+                os.environ["PODCAST_DEFAULT_LEVEL"] = "novice"
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    bad = load()["default_level"]
+                check("invalid PODCAST_DEFAULT_LEVEL warns and keeps informed",
+                      bad == "informed" and "intro, informed, expert" in err.getvalue())
+            finally:
+                os.environ.pop("PODCAST_DEFAULT_LEVEL", None)
+            lvl_env = dict(os.environ, PODCAST_CONFIG=os.path.join(td, "set-level.json"))
+            for bad_level in ("novice", "fast"):
+                r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", f"default_level={bad_level}"],
+                                   capture_output=True, text=True, env=lvl_env)
+                check(f"set default_level={bad_level} exits 2 naming intro, informed, expert, writes nothing",
+                      r.returncode == 2 and "intro, informed, expert" in r.stderr
+                      and not os.path.exists(lvl_env["PODCAST_CONFIG"]))
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", "default_level= Expert "],
+                               capture_output=True, text=True, env=lvl_env)
+            check("set default_level= Expert  persists as expert",
+                  r.returncode == 0 and json.loads(r.stdout)["default_level"] == "expert")
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "set", "default_level=informed"],
+                               capture_output=True, text=True, env=lvl_env)
+            check("set default_level=informed persists (the rollback switch)",
+                  r.returncode == 0 and json.loads(r.stdout)["default_level"] == "informed")
+            lvl_cfg = dict(DEFAULTS)
+            with contextlib.redirect_stderr(io.StringIO()):
+                _apply_known_settings(lvl_cfg, {"default_level": "EXPERT"}, "test option")
+            check("install option default_level is normalised (EXPERT -> expert)",
+                  lvl_cfg["default_level"] == "expert")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(dict(json.loads(kept_file), default_level="novice"), f)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                file_level = load()["default_level"]
+            check("config file with default_level=novice warns and keeps informed",
+                  file_level == "informed" and "intro, informed, expert" in err.getvalue())
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(kept_file)
             os.environ["PODCAST_VOICE_ENGINE"] = ""
             cfg = load()
             check("empty env var does NOT override file", cfg["voice_engine"] == "piper")
@@ -1818,6 +2057,10 @@ def run_selftest():
             check("status exposes episodes_dir (SKILL.md has always read it from here)",
                   st_cfg["episodes_dir"] == "/tmp/EP")
             check("status exposes default_cast", st_cfg["default_cast"] == "panel")
+            check("status exposes default_level (informed unless changed)",
+                  st_cfg["default_level"] == "informed"
+                  and status(dict(base_cfg, default_level="expert"), everything_det)["config"]["default_level"]
+                  == "expert")
             check("status exposes every setting, not a hand-picked few",
                   set(st_cfg) == set(DEFAULTS))
 
@@ -2029,17 +2272,19 @@ def _parse_kv_args(items):
     for item in items:
         if "=" not in item:
             print(f"error: expected key=value, got {item!r}", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(2)
         key, _, val = item.partition("=")
         key = key.strip()
         if key not in DEFAULTS:
             print(f"error: unknown setting {key!r}. Known settings: {', '.join(sorted(DEFAULTS))}",
                   file=sys.stderr)
-            sys.exit(1)
+            sys.exit(2)
+        val = normalise_enum(key, val)
         choices = ENUM_CHOICES.get(key)
         if choices and val not in choices:
+            # Bad input is exit 2 (the repo-wide convention; 3 means "not installed").
             print(f"error: {key} must be one of {', '.join(choices)}, got {val!r}", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(2)
         updates[key] = val
     return updates
 
@@ -2062,7 +2307,7 @@ def main(argv=None):
     if cmd == "set":
         if not rest:
             print("error: usage: config.py set key=value [key=value ...]", file=sys.stderr)
-            sys.exit(1)
+            sys.exit(2)
         updates = _parse_kv_args(rest)
         new_cfg = save(updates)
         print(json.dumps(new_cfg, indent=2, sort_keys=True))

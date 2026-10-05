@@ -1,0 +1,50 @@
+# FICTIONAL eval fixture: learn-topic, level expert, cast two-host. Facts trace to ../sources.md.
+# ── 1. Heat kept in a silo of stone ─────
+MAYA: I'm Maya, this is Alex, and today we're looking at the stone heat battery. Specifically, where the numbers from the Stonebridge unit hold up, and where they don't.
+ALEX: And I'm the one asking the questions today.
+---
+# ── 2. Where the losses really go ─────
+MAYA: Here's the edge case. The unit stores spare wind power as heat. It loses about one percent of that heat a day.
+ALEX: One percent. That's my puzzle, then. Where does it actually leave?
+MAYA: So, a guess. Where does most of the daily loss go?
+ALEX: Through the walls, surely.
+MAYA: That's what the project's own engineers expected. It's wrong. About two thirds of the loss went out through the air ducts at the top.
+ALEX: Wait. [pause 0.7] The ducts? Not the walls?
+MAYA: The ducts. Picture the silo's daily loss as three parts. Two of them leave through the ducts at the top.
+[pause 1.2]
+ALEX: So the walls lose... less than the ducts?
+MAYA: That's the reading. And the report says it matters for scaling. A bigger silo cuts wall loss per tonne. It doesn't cut duct loss.
+ALEX: Let me try it back. The wall loss per tonne shrinks as you scale. The duct loss doesn't. So the next design should go after the ducts.
+MAYA: That last part is your inference, not the report's. The report only measures where the loss went. But yes, that's your one percent answered. Mostly ducts, not walls.
+[pause 2]
+---
+# ── 3. The conversion trade-off ─────
+MAYA: Now the trade-off I think matters most. What you get back depends on the form you take it in.
+ALEX: Right. So how much comes back?
+MAYA: Guess first. Heat out, as a share of electricity in.
+ALEX: I don't know. Give me the number.
+MAYA: About eighty-five percent, delivered as useful heat to the network.
+ALEX: Eighty-five. [pause 0.7] And as electricity?
+MAYA: The report estimates under forty percent. So the unit sells heat only.
+[pause 1.2]
+ALEX: Under forty. So it only... makes sense as heat?
+MAYA: That's how the report treats it. And here's how it did. In January and February it supplied sixty percent of the town's district heating.
+ALEX: Sixty percent. From one silo.
+MAYA: Picture the network's load in those two months as ten units. Six came out of the stone.
+MAYA: The report lead, Dana Ward, put it like this. Quote. "Stone is boring, and boring is the point."
+[pause 1.5]
+ALEX: Let me try it back. Eighty-five percent as heat. Under forty as power, by the report's estimate. So you only ever take it out as heat.
+MAYA: Right. At least here.
+[pause 2.5]
+MAYA: Which is why I think calling it a battery oversells it. My read? It's a heat store, and that's the honest pitch.
+ALEX: I'd push back. It keeps spare power for later. I think that's the job, whatever form comes out.
+MAYA: I think a buyer hears battery and expects electricity back.
+ALEX: Fair. I'm not sure we settle that one.
+MAYA: Maybe not. But my advice is this. It's a heat store, so judge it against heat.
+---
+# ── 4. What we couldn't verify ─────
+ALEX: Before we go. What couldn't we pin down?
+MAYA: Two things. A local paper reported a build cost of four million dollars. We couldn't verify it, so there's no cost per megawatt-hour here.
+ALEX: Okay. And the second?
+MAYA: A supplier's blog claims the stone lasts thirty years. That's their claim. We have one winter of data, not thirty.
+MAYA: So, three things to remember. Most of the loss is ducts, not walls. It's eighty-five percent as heat, and by the report's estimate, under forty as power. And it's one winter, so far.

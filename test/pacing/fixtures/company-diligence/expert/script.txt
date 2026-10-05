@@ -1,0 +1,46 @@
+# FICTIONAL eval fixture: company-diligence, level expert, cast two-host. Facts trace to ../sources.md.
+# ── 1. Can you lean on Lantern for three years? ─────
+MAYA: I'm Maya, this is Alex, and today we're looking at Lantern Robotics. Specifically, the quality behind its numbers, for a partner signing for three years. This isn't investment advice.
+ALEX: And I'm the one asking the questions today.
+---
+# ── 2. Quality of earnings ─────
+MAYA: Here's what's at stake. A three-year commitment needs a counterparty that's solvent in year three. The headline loss won't tell you that. I think the operating loss will.
+ALEX: So my puzzle is the gap between those two. How wide is it?
+MAYA: Hold on to that. First, the margin line. Gross margin was thirty-eight percent last year, up from twenty-nine in twenty twenty-three. On forty-eight million of revenue.
+[pause 1.2]
+MAYA: Now a guess. The net loss was five million. How much of that is one-off?
+ALEX: I don't know. Tell me.
+MAYA: Here's the catch. The five includes a one-time gain of six million from a site sale. Operating loss before it was eleven.
+ALEX: Wait. [pause 0.7] So the real loss is... eleven? Not five?
+MAYA: Eleven. That's more than double the headline, by our arithmetic. Picture the income statement with the site sale struck out. The five becomes an eleven. Set that against twenty-two million of year-end cash.
+[pause 1.2]
+ALEX: Let me try it back. The margin went up. The five has a one-time gain in it. And twenty-two million of cash covers... how long?
+MAYA: About two years, at last year's rate. That's our arithmetic, not their guidance. So, your gap. Six million wide. And a partner's year three sits past the cash.
+MAYA: The line to keep. Five on the headline, eleven underneath.
+[pause 2]
+---
+# ── 3. What the renewals are worth ─────
+MAYA: Now concentration, and whether the renewals offset it. Forty-one percent of revenue is one customer, Northfield Foods. The contract ends at the end of twenty twenty-seven. And every renewal in the last two years went through. Nine of nine.
+ALEX: Forty-one. [pause 0.7] Against nine of nine, though?
+MAYA: Guess first. Is nine of nine proof of pricing power?
+ALEX: I'd have said yes. A perfect renewal record usually is.
+MAYA: That's the common read. Four of the nine renewed with price cuts. Ten to fifteen percent.
+ALEX: Four of nine. With cuts.
+[pause 1.2]
+MAYA: And here's the chief executive, Helen Brooks, in the annual report. Quote. "We would rather grow slowly than grow on one customer."
+[pause 1.5]
+ALEX: Huh. Forty-one percent says otherwise.
+MAYA: Picture last year's revenue line as ten dollars. About four came from Northfield. And on four of the nine renewals, the price came down.
+[pause 2.5]
+MAYA: My read? Retention is bought, not earned, and the concentration is the real exposure.
+ALEX: I'd weigh it differently. Cutting price on four renewals to keep them is a choice. I think it shows customers still want the product.
+MAYA: Or, I think, that they could walk, and Lantern knew it.
+ALEX: Maybe. Nothing you've told me says which.
+MAYA: Fair. That one stays open. The line to keep. Nine renewals out of nine, four of them at a discount.
+---
+# ── 4. What we couldn't verify ─────
+ALEX: Before we go. What couldn't we pin down?
+MAYA: Two things. A trade newsletter reported that Northfield is trialling a rival's robots. Unverified. If you're signing, ask Northfield directly.
+ALEX: Okay. And the second?
+MAYA: A co-founder said in an interview that a new funding round is coming. An interested party, and unconfirmed. I wouldn't model it.
+MAYA: So, three things to remember. Operating loss is eleven, not five. Forty-one percent concentration last year, and a contract that ends with twenty twenty-seven. And four of the nine renewals came with price cuts.

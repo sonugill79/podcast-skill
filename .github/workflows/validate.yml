@@ -19,6 +19,9 @@ jobs:
             echo "=== $s"; python3 "$s" --selftest
           done
 
+      - name: Pacing eval fixtures (render.py --dry-run --strict on each, source trace, negative control; no engine)
+        run: bash test/pacing/run.sh
+
       - name: Installer is syntactically valid and has no bashisms beyond bash 3.2
         run: |
           bash -n plugins/podcast/skills/podcast/scripts/setup.sh

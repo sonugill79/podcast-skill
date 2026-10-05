@@ -1,0 +1,55 @@
+# FICTIONAL eval fixture: learn-topic, level informed, cast two-host. Facts trace to ../sources.md.
+# ── 1. Heat kept in a silo of stone ─────
+MAYA: I'm Maya, this is Alex, and today we're looking at the stone heat battery. Specifically, how a silo of hot rock keeps a town warm.
+ALEX: And I'm the one asking the questions today.
+---
+# ── 2. How a pile of rock holds heat ─────
+MAYA: Here's what's at stake. A town wants winter heat from wind power the grid can't use.
+ALEX: So how do you keep power the grid can't use until someone needs it?
+MAYA: Hold on to that. First, a smaller question. What do you think is inside the silo?
+ALEX: I don't know.
+MAYA: Rock. Two thousand tonnes of crushed basalt, in a steel silo twelve metres tall.
+[pause 1.2]
+ALEX: Two thousand tonnes. Of crushed rock?
+MAYA: Of crushed rock. Spare wind power runs electric coils, which heat the air. Fans blow the hot air down through the stone.
+ALEX: And the stone just... gets hot?
+MAYA: Very hot. About six hundred degrees Celsius.
+ALEX: Huh. [pause 0.7] Six hundred degrees? Inside a steel silo?
+MAYA: Inside the steel, yes. Picture a grain silo, filled with crushed rock instead of grain.
+[pause 1.2]
+MAYA: Now a guess. When the town needs it, what comes back out?
+ALEX: Electricity? Like a phone battery giving its charge back?
+MAYA: That's the common guess. It isn't. Cooler air goes up through the stone. Hot air comes out. That heats the water in the town's pipes.
+ALEX: Let me try it back. Spare wind heats the rock. The rock holds it. When the town needs it, air carries it back out as heat.
+MAYA: That's it. The stone is the store. So your puzzle has an answer. You keep the wind as heat, in rock.
+[pause 2]
+---
+# ── 3. What one winter showed ─────
+MAYA: Now the part I think matters most to the town. Did it actually keep people warm?
+ALEX: That's my question too. I'd want to know how much it leaks. How much does it lose?
+MAYA: Guess first. Per day.
+ALEX: I don't know. Tell me.
+MAYA: About one percent a day, in the winter trial.
+ALEX: One percent. [pause 0.7] Only one?
+MAYA: Only one. By our arithmetic, after a week more than nine parts in ten are still there. And about eighty-five percent of the power going in came out as useful heat.
+[pause 1.2]
+MAYA: Here's the big one. In January and February, it supplied sixty percent of the town's district heating. That's hot water, piped from one central plant to every connected home.
+ALEX: Sixty percent. From a pile of rock.
+MAYA: Picture the district heating in those two months as ten buckets of hot water. Six of them came from the stone.
+MAYA: The report's lead, Dana Ward, put it like this. Quote. "Stone is boring, and boring is the point."
+[pause 1.5]
+ALEX: Let me try it back. It loses about one percent a day. It gives back most of what goes in. And in January and February it ran most of the town.
+MAYA: Most of the district heating, yes. Not the electricity. The report estimates that turning that heat back into power would return under forty percent. So it only sells heat.
+[pause 2.5]
+MAYA: That's why I think the word battery oversells it. My read? It's a heat store, and that's the honest pitch.
+ALEX: I'd push back. It keeps spare power for later. I think that's what a battery is for.
+MAYA: I'd say a battery gives you back what you put in. This gives you back something else.
+ALEX: Fair. I'm not sure we settle that one.
+MAYA: Maybe not. But the line to keep is simple. The stone is the store, and it stores heat.
+---
+# ── 4. What we couldn't verify ─────
+ALEX: Before we go. What couldn't we pin down?
+MAYA: Two things. A local paper reported the build cost four million dollars. We couldn't check that against a primary source.
+ALEX: Okay. And the second?
+MAYA: A supplier's blog claims the stone lasts thirty years. That's their claim, not something we verified.
+MAYA: So, three things to remember. The stone is the store. It loses about one percent a day. And it gives back heat, not power.

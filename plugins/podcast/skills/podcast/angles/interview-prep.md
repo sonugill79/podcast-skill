@@ -17,7 +17,7 @@ clear about whether the role fits their criteria.
 | 2 | Product & customers | Product lines today, pricing, app-store/Trustpilot ratings **with counts and dates**, complaint themes (say sample size), launches in the last 12 months, fraud/trust issues |
 | 3 | People, culture & interview process | Current leadership with dates, **values verbatim**, eng org and hubs, work policy, layoffs, Glassdoor/Blind (snippets, labelled), interview loop for this level, comp (posting band + levels.fyi) |
 | 4 | Market, competition & regulation | Market size, competitors table, M&A, regulation and policy that becomes engineering/ops work, macro risks |
-| 5 | The role itself | **Posting verbatim via `bin/rawfetch.py`**, the team's public stack/tooling, reporting line, industry context for the function, likely questions, strengths/gaps vs the listener |
+| 5 | The role itself | **Posting verbatim via `SCRIPTS/rawfetch.py`**, the team's public stack/tooling, reporting line, industry context for the function, likely questions, strengths/gaps vs the listener |
 
 `quick` depth merges 1+4 and folds 2 into 1, keeping 3 and 5 (3 agents).
 
@@ -32,6 +32,17 @@ clear about whether the role fits their criteria.
 8. Your story in their language: values mapping, likely questions, a "why us, why now" sketch (15%)
 9. Questions to ask, and things to weigh against the listener's criteria (location, comp, stability) (9%)
 10. Wrap: three things to remember, what couldn't be verified, what to re-check before the next round (5%)
+
+## Level notes
+`brief.md` `level:` sets the pitch (SKILL.md §Invocation).
+
+| Level | Assumes | Explain or add | Skip or shorten |
+|---|---|---|---|
+| intro | new to the industry or the function | The industry's terms and how the company makes money, from scratch; what the function does day to day; why each regulation turns into work for the team | Financial detail beyond the headline and the misleading number; the competitors table shrinks to the top two or three |
+| informed (default) | the industry's basics and the function | New or contested terms only | Nothing: the outline as written |
+| expert | a practitioner in this function and industry | The role's hard problems, trade-offs in the public stack, the likely technical questions at this level, and the questions a senior hire would ask | What the industry or function is; generic interview advice; the company segment compresses to the numbers that matter |
+
+Level never changes verification: the must-verify list below, SKILL.md §3 and `sources.md` tracing are the same at every level, and so is saying what couldn't be verified. Where SKILL.md §4's lesson shape applies, it holds at every level: the level changes what the learner's puzzle and wrong guess are, never whether the guess comes from `sources.md`.
 
 ## Must verify yourself (never air from agent notes alone)
 - Every quoted line of the posting, plus its salary band and work policy, via `rawfetch.py --grep`. Take the band from

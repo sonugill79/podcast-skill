@@ -6,3 +6,6 @@ episodes/
 .tts-cache/
 *.mp3
 *.wav
+
+# owner recordings used for ear tests; never commit
+test-content/

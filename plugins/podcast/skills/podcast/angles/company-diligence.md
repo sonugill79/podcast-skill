@@ -34,6 +34,17 @@ the bear case is, and what to watch next. **Not investment advice.** Say so once
 9. What to watch next quarter (4%)
 10. Wrap: three things to remember, what couldn't be verified (4%)
 
+## Level notes
+`brief.md` `level:` sets the pitch (SKILL.md §Invocation).
+
+| Level | Assumes | Explain or add | Skip or shorten |
+|---|---|---|---|
+| intro | new to reading a company | Each metric the first time it is said (gross margin, free cash flow, dilution, a multiple) and each document (a 10-K, a Form 4); one image per number | Second-order detail (segment margins, the debt maturity schedule); valuation shrinks to one multiple against one named peer |
+| informed (default) | the standard metrics and filings | New or contested terms only | Nothing: the outline as written |
+| expert | reads filings for a living | Segment economics, accounting choices (revenue recognition, capitalised costs), quality of earnings, the specific variables the bull and bear cases turn on | Definitions of standard metrics and filings; the business-in-three-minutes segment compresses |
+
+Level never changes verification: the must-verify list below, SKILL.md §3 and `sources.md` tracing are the same at every level, and so is saying what couldn't be verified. Where SKILL.md §4's lesson shape applies, it holds at every level: the level changes what the learner's puzzle and wrong guess are, never whether the guess comes from `sources.md`.
+
 ## Must verify yourself
 - Every financial figure against the filing or earnings release (primary), with period stated.
 - Share count / dilution / SBC figures; one-time items.
