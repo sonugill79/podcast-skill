@@ -454,7 +454,31 @@ def select_backend(model_override, which_config=_UNSET, which_fn=None):
     if venv_python:
         level = model_override or resolve_qa_level(which_config=cfg) or 'small'
         return ('faster_whisper', venv_python, level)
+    repair = qa_repair_needed(which_config=cfg)
+    if repair:
+        # Installed, but an outside update broke it (config.detect() names it, e.g.
+        # "av 19.0.1") -- a ~35 MB repair of the active level, not a fresh install.
+        die(f'audio QA needs a repair ({repair}): run /podcast upgrade qa '
+            f'(~{_repair_mb(cfg)} MB, model kept)', 3)
     die('audio QA not installed — run: /podcast upgrade qa', 3)
+
+
+def qa_repair_needed(which_config=_UNSET):
+    """config.detect()['qa']['repair'] (e.g. "av 19.0.1") or None. Never raises."""
+    cfg = config if which_config is _UNSET else which_config
+    if not cfg:
+        return None
+    try:
+        return (cfg.detect().get('qa', {}) or {}).get('repair') or None
+    except Exception:
+        return None
+
+
+def _repair_mb(cfg):
+    try:
+        return int(getattr(cfg, 'QA_REPAIR_BYTES', 35_000_000)) // 1_000_000
+    except Exception:
+        return 35
 
 
 # The faster-whisper backend is driven through this tiny inline script rather than
@@ -1354,6 +1378,24 @@ def run_selftest():
             die('audio QA not installed — run: /podcast upgrade qa', 3)
     except SystemExit:
         pass
+    repair_buf = io.StringIO()
+    repair_code = None
+    try:
+        with contextlib.redirect_stderr(repair_buf):
+            select_backend(None, which_config=FakeQAConfig(
+                detect={'qa': {'whisper_cli': None, 'faster_whisper': False, 'models': ['medium'],
+                               'repair': 'av 19.0.1'}, 'qa_active': 'medium'},
+                venv='/state/venv/bin/python3'), which_fn=no_which)
+    except SystemExit as e:
+        repair_code = e.code
+    check('select_backend: a QA install needing repair exits 3 naming the repair, not "not installed"',
+          repair_code == 3 and 'needs a repair (av 19.0.1)' in repair_buf.getvalue()
+          and 'upgrade qa' in repair_buf.getvalue() and 'model kept' in repair_buf.getvalue()
+          and 'MB' in repair_buf.getvalue() and 'not installed' not in repair_buf.getvalue())
+    check('qa_repair_needed: None when config reports no repair, and when detect() raises',
+          qa_repair_needed(FakeQAConfig(detect={'qa': {'faster_whisper': True}})) is None
+          and qa_repair_needed(FakeQAConfig(raise_detect=True)) is None)
+
     check('the ffmpeg-missing and no-backend-installed messages are textually distinct',
           ffmpeg_buf.getvalue() != no_backend_buf.getvalue())
     check('...the ffmpeg message names ffmpeg specifically',

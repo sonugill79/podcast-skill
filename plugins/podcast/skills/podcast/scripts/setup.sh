@@ -33,6 +33,8 @@
 #   - piper-tts:    https://pypi.org/project/piper-tts/            (`pip install piper-tts`, pinned ==1.8.0)
 #   - kokoro-onnx:  https://pypi.org/project/kokoro-onnx/          (`pip install kokoro-onnx`, pinned ==0.6.1)
 #   - faster-whisper: https://pypi.org/project/faster-whisper/     (`pip install faster-whisper`, pinned ==1.2.1)
+#   - av (PyAV, faster-whisper's audio decoder): https://pypi.org/project/av/   (constrained >=11,<19 --
+#     see AV_PIN; added 2026-10-04)
 #   - piper voices: https://huggingface.co/rhasspy/piper-voices (tag v1.0.0)
 #   - kokoro model: https://github.com/thewh1teagle/kokoro-onnx/releases (tag model-files-v1.0)
 #   - whisper models: Systran/faster-whisper-{base,small,medium} on Hugging Face,
@@ -94,6 +96,23 @@ KOKORO_ONNX_PIN="kokoro-onnx==0.6.1"
 NUMPY_PIN="numpy==2.5.3"
 SOUNDFILE_PIN="soundfile==0.14.0"
 FASTER_WHISPER_PIN="faster-whisper==1.2.1"
+# av is faster-whisper's own dependency (it declares only `av>=11`), so it used to
+# float. Found by test/stranger.sh, 2026-10-04: av 19.0.0 (2026-09-29) REMOVED the
+# `metadata_errors` argument to av.open() (PyAV CHANGELOG, v19.0.0 "Major"), and
+# faster_whisper 1.2.1's audio.py calls av.open(file, mode="r", metadata_errors="ignore")
+# -- so a fresh install got av 19.0.1 and every qa.py run died with TypeError, while
+# older installs (av 18.1.0) kept working. Verified in a scratch venv: 17.1.0 and
+# 18.1.0 open a wav with that argument, 19.0.1 raises. Upper bound only, not ==18.1.0:
+# av 18 needs Python >=3.11 and av 17 >=3.10, and nothing else in the qa install
+# gates the Python version, so a range lets pip pick the newest wheel that exists for
+# the user's Python while still excluding the release that breaks the call. The lower
+# bound just restates faster-whisper's own. Lift the cap only together with a
+# faster-whisper release that stops passing metadata_errors.
+AV_PIN="av>=11,<19"
+AV_BROKEN_MAJOR=19
+# What replacing an incompatible av costs (manylinux x86_64 wheel of av 18.1.0 is
+# 35 MB; macOS ~18-22 MB). It replaces the av already in the venv, so disk use is flat.
+AV_REPAIR_SIZE_LABEL="~35 MB download"
 
 # Approximate sizes shown to the user before a download, and floors used to reject a
 # truncated/corrupt file (see the sha256 checks in the four big model downloads for
@@ -567,6 +586,68 @@ PYEOF
   echo "voice-kokoro installed."
 }
 
+# _venv_site_packages: the venv's LIVE site-packages (the one its python imports
+# from). Python version from pyvenv.cfg (`version`/`version_info`), else from the one
+# bin/python3.X. Deliberately not a glob over lib/python*/: a stale dir left by an
+# older Python is never imported from, and an old av in it must not trigger a repair
+# that can never clear. Must agree with config.py's _venv_site_packages().
+_venv_site_packages() {
+  _spmm="$(sed -n 's/^[[:space:]]*version\(_info\)\{0,1\}[[:space:]]*=[[:space:]]*\([0-9][0-9]*\.[0-9][0-9]*\).*/\2/p' \
+    "$VENV_DIR/pyvenv.cfg" 2>/dev/null | head -1)"
+  if [ -z "$_spmm" ]; then
+    _spn=0
+    for _spp in "$VENV_DIR"/bin/python3.*; do
+      [ -e "$_spp" ] || continue
+      _spb="${_spp##*/python}"
+      case "$_spb" in
+        3.*[!0-9.]*|3.*.*.*) continue ;;
+      esac
+      _spmm="$_spb"; _spn=$((_spn + 1))
+    done
+    [ "$_spn" = "1" ] || _spmm=""
+  fi
+  [ -n "$_spmm" ] || return 0
+  [ -d "$VENV_DIR/lib/python$_spmm/site-packages" ] && printf '%s\n' "$VENV_DIR/lib/python$_spmm/site-packages"
+  return 0
+}
+
+# _venv_av_versions: every av version with a dist-info dir in the venv's live
+# site-packages, one per line (no Python started, no import -- an av that cannot
+# even be imported is still found). Several can exist if a pip run was interrupted;
+# callers treat the install as broken if ANY of them is incompatible. Empty if the
+# venv or av isn't there.
+_venv_av_versions() {
+  _avsp="$(_venv_site_packages)"
+  [ -n "$_avsp" ] || return 0
+  for _avd in "$_avsp"/av-*.dist-info; do
+    [ -d "$_avd" ] || continue
+    _avv="${_avd##*/av-}"; _avv="${_avv%.dist-info}"
+    printf '%s\n' "$_avv"
+  done
+  return 0
+}
+
+# _venv_av_incompatible: prints the first incompatible av version found (empty if none).
+_venv_av_incompatible() {
+  for _avx in $(_venv_av_versions); do
+    if _av_is_incompatible "$_avx"; then
+      printf '%s\n' "$_avx"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# _av_is_incompatible VERSION: true if VERSION is an av release faster-whisper's file
+# decoding is known to break on (major >= AV_BROKEN_MAJOR -- see AV_PIN).
+_av_is_incompatible() {
+  _avmajor="${1%%.*}"
+  case "$_avmajor" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$_avmajor" -ge "$AV_BROKEN_MAJOR" ]
+}
+
 install_qa() {
   assume_yes="$1"; level="$2"
   # qa.py unconditionally shells out to `ffmpeg` to convert the episode audio to
@@ -586,23 +667,52 @@ install_qa() {
   echo "runtime is the bulk of the download, much bigger than the model itself) and"
   echo "downloads the Systran/faster-whisper-$level model -- $size_label total on a"
   echo "fresh install (deps are shared across every qa-* level you install)."
+  # Repair path (2026-10-04): an install made while av floated may hold av 19+, which
+  # faster-whisper 1.2.1 cannot decode a file with. Re-running this install is the
+  # fix -- the pip line below carries AV_PIN, so pip swaps av in place; nothing has to
+  # be deleted and the model is not re-downloaded. Said in one line, with its size,
+  # before the confirmation so the user knows what is actually about to happen.
+  av_bad="$(_venv_av_incompatible)"
+  if [ -n "$av_bad" ]; then
+    echo "repairing: av $av_bad cannot read audio files with $FASTER_WHISPER_PIN -- replacing it with $AV_PIN ($AV_REPAIR_SIZE_LABEL, the model is kept)."
+  fi
   need_yes_or_confirm "$assume_yes"
 
   ensure_venv
-  echo "installing $FASTER_WHISPER_PIN ..."
-  venv_pip install -q "$FASTER_WHISPER_PIN" || die "pip install $FASTER_WHISPER_PIN failed. Check your network, or try: $VENV_DIR/bin/python3 -m pip install $FASTER_WHISPER_PIN   to see the full error."
+  if [ -n "$av_bad" ]; then
+    # Clear EVERY av distribution first, then install the pinned one. A plain
+    # `pip install 'av<19'` is not enough when an interrupted pip left two av
+    # dist-info dirs: pip may see the compatible one, call the requirement
+    # satisfied, and leave the av-19 metadata (and the planner's repair flag)
+    # behind forever. `pip uninstall` removes one distribution per call using its
+    # own RECORD (so its files go too), hence the bounded loop. Any av dist-info
+    # still left after that has no usable RECORD; it is deleted directly -- only
+    # inside the live site-packages of the venv this script created and owns.
+    _avtries=0
+    while [ -n "$(_venv_av_versions)" ] && [ "$_avtries" -lt 4 ]; do
+      venv_pip uninstall -y -q av >/dev/null 2>&1 || break
+      _avtries=$((_avtries + 1))
+    done
+    _avsp="$(_venv_site_packages)"
+    if [ -n "$_avsp" ]; then
+      for _avd in "$_avsp"/av-*.dist-info; do
+        [ -d "$_avd" ] && rm -rf "$_avd"
+      done
+    fi
+  fi
+  echo "installing $FASTER_WHISPER_PIN ($AV_PIN) ..."
+  venv_pip install -q "$FASTER_WHISPER_PIN" "$AV_PIN" || die "pip install $FASTER_WHISPER_PIN '$AV_PIN' failed. Check your network, or try: $VENV_DIR/bin/python3 -m pip install $FASTER_WHISPER_PIN '$AV_PIN'   to see the full error."
 
   mkdir -p "$MODELS_DIR/whisper"
-  echo "downloading/verifying the $level model (this also runs it once, transcribing silence, as a smoke test) ..."
+  echo "downloading/verifying the $level model (this also runs it once, transcribing a silent WAV file, as a smoke test) ..."
   # Prints one absolute path per line: model.bin, then whichever of its snapshot
   # siblings exist (tokenizer.json etc -- recording more than just the blob means a
   # partially-pruned HF cache dir is caught, not just the blob going missing), then
   # the faster_whisper package's own __init__.py (so `pip uninstall faster-whisper`,
   # which leaves the venv directory intact, is caught too).
-  qa_out=$("$VENV_DIR/bin/python3" - "$MODELS_DIR/whisper" "$level" "$min_bytes" <<'PYEOF'
-import glob, os, sys
-import numpy as np
-models_dir, level, min_bytes = sys.argv[1], sys.argv[2], int(sys.argv[3])
+  qa_out=$("$VENV_DIR/bin/python3" - "$MODELS_DIR/whisper" "$level" "$min_bytes" "$STATE_DIR/.smoke-qa.wav" "$AV_PIN" <<'PYEOF'
+import glob, os, sys, wave
+models_dir, level, min_bytes, smoke_wav, av_pin = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 from faster_whisper import WhisperModel
 model = WhisperModel(level, device="cpu", compute_type="int8", download_root=models_dir)
 pattern = os.path.join(models_dir, f"models--Systran--faster-whisper-{level}", "snapshots", "*", "model.bin")
@@ -615,9 +725,34 @@ size = os.path.getsize(model_path)
 if size < min_bytes:
     print(f"model.bin is only {size} bytes (expected at least {min_bytes})", file=sys.stderr)
     sys.exit(1)
-# Smoke test: transcribe 1s of silence straight from a numpy array -- proves the
-# whole decode path works without needing ffmpeg or a sample audio file on disk.
-list(model.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)[0])
+# Smoke test: transcribe 1s of silence from a WAV FILE on disk -- the same path qa.py
+# uses (model.transcribe(<path>) -> faster_whisper.audio.decode_audio -> av.open).
+# It used to pass a numpy array, which skips av entirely, so an av that could not
+# open files (av 19 vs faster-whisper 1.2.1, 2026-10-04) passed install and failed
+# every real QA run. The WAV is written with the stdlib `wave` module: no ffmpeg, no
+# sample file shipped.
+try:
+    w = wave.open(smoke_wav, "wb")
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+    w.writeframes(b"\0\0" * 16000)
+    w.close()
+    try:
+        list(model.transcribe(smoke_wav, beam_size=1)[0])
+    except Exception as e:  # noqa: BLE001 -- report it in the user's terms, then fail
+        try:
+            import av
+            av_version = av.__version__
+        except Exception:  # noqa: BLE001
+            av_version = "unknown"
+        print(f"faster-whisper could not decode a WAV file ({type(e).__name__}: {e}). "
+              f"Installed av is {av_version}; this install needs {av_pin}. "
+              f"Re-run: setup.sh install qa-{level} --yes", file=sys.stderr)
+        sys.exit(1)
+finally:
+    try:
+        os.remove(smoke_wav)
+    except OSError:
+        pass
 
 out_files = [model_path]
 # The friendly-named siblings (tokenizer.json etc) live next to the SYMLINK
@@ -1303,8 +1438,12 @@ if not d["components"]:
 else:
     # An upgrade says so: "downloading voice-kokoro" reads like a missing piece,
     # and the one line the skill relays is the only thing the user ever sees.
+    # A repair (an installed component broken by an outside change, e.g. av 19 vs
+    # faster-whisper 1.2.1) is named as one, so a small fix never reads like a new
+    # 575 MB download.
     names = ", ".join(
         f"{c['component']} (upgrade from {c['upgrade_from']})" if c.get("upgrade_from")
+        else f"{c['component']} (repair: {c['repair']} is incompatible)" if c.get("repair")
         else c["component"]
         for c in d["components"])
 
