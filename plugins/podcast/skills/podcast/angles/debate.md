@@ -42,13 +42,13 @@ this position, what they actually said, and what evidence they point at. A side 
 with no sources has failed, and the script must not paper over it — say on air that one side's case is thinly
 evidenced, because that is itself the finding.
 
-`quick` depth merges 3+4 and keeps 1, 2 and 5 (3 agents). Never drop 1 or 2 — they are the episode.
+`quick` depth merges 3, 4 and 5 into one agent and keeps 1 and 2 (3 agents). Never drop 1 or 2 — they are the episode.
 
 ## Segment outline (≈ share of runtime)
 1. HOST: the question, why it is live now, and what would change if it were settled (8%)
 2. HOST: the common ground — what nobody in this argument disputes (10%)
-3. ADVOCATE: the case for, uninterrupted, at full strength (18%)
-4. SKEPTIC: the case against, uninterrupted, at full strength (18%)
+3. ADVOCATE: the case for, uninterrupted by the other side (the host may react), at full strength (18%)
+4. SKEPTIC: the case against, uninterrupted by the other side (the host may react), at full strength (18%)
 5. Cross-examination: they go at each other directly, host only steering (22%)
 6. HOST presses both: the weakest link in each case, named (12%)
 7. HOST: where the disagreement actually lives — fact, value, or risk tolerance (7%)
@@ -59,6 +59,20 @@ episode: not "which is better" but **who should pick which**. Name the reader pr
 the team size, the constraint, the workflow, the budget — because two good options rarely lose to each other
 outright, they lose to a mismatch. "If you're X, take A; if you're Y, take B; here's the one case where it
 genuinely doesn't matter."
+
+## Level notes
+`brief.md` `level:` sets the pitch (SKILL.md §Invocation).
+
+| Level | Assumes | Explain or add | Skip or shorten |
+|---|---|---|---|
+| intro | new to the question | The host defines the question's terms and says what each piece of evidence measured, in plain words, before a side leans on it, and asks a guest to define any term the moment they use it | Methodological detail beyond what a study measured and what it doesn't show; each side's secondary arguments |
+| informed (default) | the basics of the field | New or contested terms only | Nothing: the outline as written |
+| expert | the field and its literature | Method critique of the evidence (samples, confounders, funding), the strongest edge-case arguments, cross-examination on specifics | Common ground (segment 2) compresses to the contested floor; no definitions of standard terms |
+
+The sides are the same at every level: the level changes how deep they argue, never which positions exist, and
+never the lopsidedness the host reports in segment 8.
+
+Level never changes verification: the must-verify list below, SKILL.md §3 and `sources.md` tracing are the same at every level, and so is saying what couldn't be verified.
 
 ## Must verify yourself
 - **Every position is attributed to someone who holds it.** A claim of the form "critics argue…" with no

@@ -1,13 +1,13 @@
 # CLAUDE.md: podcast-skill
 
 Portable, de-personalised twin of a working private pipeline. This repo is packaged as a Claude Code **plugin** and
-also acts as its own **marketplace**. **Read `PLAN.md` first** — it holds the decisions, the verified plugin
-mechanics, the file contracts, the privacy gate and the acceptance test.
+also acts as its own **marketplace**. Phase decisions, file contracts and acceptance tests live in `docs/phases/`; the privacy gate is the "No personal
+data" step in `.github/workflows/validate.yml`; the stranger acceptance test is `test/stranger.sh`.
 
 ## Non-negotiables
 
 - **Nothing personal ships.** No names, handles, employers, projects, hostnames, tokens, chat ids or `/home/<user>`
-  paths outside `PLAN.md`, `CLAUDE.md` and `LICENSE`. CI enforces this; run the grep in `PLAN.md` §6 before any push.
+  paths outside `CLAUDE.md` and `LICENSE`. CI enforces this; run the "No personal data" grep from `validate.yml` before any push.
 - **Tier 0 must always work.** With no voice engine and no transcription installed, an episode still produces a
   researched, source-checked script. Never gate the pipeline behind an install.
 - **Upgrades are named, sized and resumable.** The user says `upgrade voice`; they are told the size first; after
@@ -40,6 +40,14 @@ and immediately picked up the fix.
 
 - Validate manifests with `claude plugin validate --strict plugins/podcast` and `... --strict .` before pushing.
 - Test the plugin without publishing: `claude --plugin-dir <repo>/plugins/podcast`.
-- Test as a stranger with a throwaway `HOME` (see `PLAN.md` §7) so local config can't mask a missing dependency.
+- Test as a stranger with a throwaway `HOME` (`test/stranger.sh`) so local config can't mask a missing dependency.
 - **Commits:** the primary checkout stays on `main` and a hook blocks commits there. Copy the tree into a worktree,
   commit there, then merge into `main`.
+
+## Phase work
+
+- Phase docs live in `docs/phases/phase-<name>/`. Process gates: `docs/ops/phase-gates-addendum.md` (repo-specific instantiation of the `phase-gates` skill).
+- `eval_suite: test/pacing/, threshold 90%`. Script-rule regression guard: fictional fixtures (3 angles × 3 levels plus a
+  red-team brief), `rubric.md` and `README.md` (how to run it). `bash test/pacing/run.sh` is the deterministic layer
+  (CI runs it, no engine); the judged layer is a Sonnet subagent scoring `rubric.md` at dev time, never in a user's
+  episode. Go-live: ≥ 90% of fixtures pass the rubric and `pacecheck --strict`, 100% pass `qa.py` ≥ 0.96.

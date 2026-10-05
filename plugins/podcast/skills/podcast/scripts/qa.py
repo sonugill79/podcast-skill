@@ -118,6 +118,21 @@ length or count before firing:
               "not" after normalization)
   (coverage/--threshold: gates only at/above --min-coverage-tokens; see above)
 
+Non-lexical sounds (config.NONLEXICAL: hmm, uh-huh, huh, ha) are optional. Before any
+gate runs, every allowlisted sound is dropped from the expected stream (it is never
+required and never counts toward coverage). At most one heard form per sound is dropped
+too -- the sound, part of it ("huh" for "uh-huh"), or a listed mishearing ("him" for
+"hmm") -- and only where difflib aligns it with that sound, never a heard word matched
+to a lexical one, and never a token a lexical word in the same replace block needs to be
+judged against ("Ask Tim, hmm." heard "Ask him." still fails NAMES). A mishearing heard
+anywhere else is judged as a word. A word the script uses as a name ("Ha Long Bay") is
+not a sound, and a script made only of sounds is judged as words, as before. "Mm-hm" is
+not on the list (the voice spells it as letters), so it is judged as ordinary words. A
+script with sounds gets one informational line, "NONLEXICAL n/m heard", and a
+"nonlexical" key in --json; a script without any is analysed, printed and written exactly
+as before. Ignore pairs were not used for this: they are exact one-to-one substitutions
+and cannot say "this token may be absent".
+
 A replace/delete op that spans more than one script line is reported once, against
 the full line range it touches ("L116-L117"), rather than guessing a per-line split
 of the heard side -- there is no way to know which half of a merged mismatch belongs
@@ -289,6 +304,11 @@ def parse_script_lines(path):
         if not m:
             continue
         speaker, text = m.group(1), m.group(2)
+        # An inline `[pause N]` is silence, not words: expect only what is spoken, and
+        # keep the line whole so "Wait." doesn't stand alone and read as DROPPED.
+        # Same syntax render.py splits on (config.PAUSE_TOKEN_RE).
+        if config is not None:
+            text = config.strip_inline_pauses(text)
         lines.append({'line': n, 'speaker': speaker, 'text': text, 'tokens': normalize(text)})
     return lines
 
@@ -705,9 +725,173 @@ def line_label(op):
     return f'L{ls[0]}–L{ls[-1]}'
 
 
-def analyze(lines, heard_text, ignore_pairs, threshold, min_coverage_tokens=MIN_COVERAGE_TOKENS):
+def default_nonlexical():
+    """config.NONLEXICAL (the one list render.py's pacecheck also reads), or no sounds at all
+    when config isn't importable -- a bare checkout then QAs exactly as before the allowlist."""
+    return (getattr(config, 'NONLEXICAL', None) or {}) if config is not None else {}
+
+
+def _sub_runs(tokens):
+    """Every contiguous run of `tokens`, longest first: whisper may catch only part of a
+    multi-word sound ("huh" for "Uh-huh", "ha ha" for "Ha ha ha")."""
+    n = len(tokens)
+    return {tuple(tokens[a:b]) for a in range(n) for b in range(a + 1, n + 1)}
+
+
+def _sound_forms(nonlexical):
+    """[(key tokens, {heard forms as token tuples}), ...], keys longest first so "uh huh" is
+    found as uh-huh, not as a lone huh (same order render.py find_sounds() uses)."""
+    table = []
+    for key, mishearings in nonlexical.items():
+        k = tuple(normalize(key))
+        if not k:
+            continue
+        forms = {tuple(normalize(m)) for m in mishearings} - {()}
+        table.append((k, forms))
+    table.sort(key=lambda kv: len(kv[0]), reverse=True)
+    return table
+
+
+def _find_expected_sounds(exp_tokens, table, proper=frozenset()):
+    """[(start, end, forms longest first), ...] for each sound in the expected stream. A repeat
+    ("ha ha") is one sound, as in render.py's pacecheck. A token the script uses as a name
+    (find_proper_words: "Ha Long Bay") is never a sound."""
+    found, i = [], 0
+    while i < len(exp_tokens):
+        for key, forms in table:
+            n = len(key)
+            if tuple(exp_tokens[i:i + n]) != key or any(t in proper for t in key):
+                continue
+            end = i + n
+            while tuple(exp_tokens[end:end + n]) == key:
+                end += n
+            occ = forms | _sub_runs(exp_tokens[i:end])
+            found.append((i, end, sorted(occ, key=lambda f: (-len(f), f))))
+            i = end
+            break
+        else:
+            i += 1
+    return found
+
+
+def nonlexical_masks(exp_tokens, heard_tokens, nonlexical, proper=frozenset()):
+    """-> (expected keep-mask, heard keep-mask, sounds expected, sounds heard).
+
+    Every expected token that is part of an allowlisted sound is dropped (a sound is never
+    required). A heard token is dropped only when it is the sound (or part of it) or one of
+    its listed mishearings, and difflib aligns it with that sound:
+      - the form must cover the heard position aligned to one of the sound's tokens (exact
+        in an 'equal' block; the left- or right-anchored offset inside a 'replace' block);
+      - it may not use a heard token matched to a lexical expected word;
+      - inside a 'replace' block it may only take heard tokens the block can spare: every
+        lexical word in the block keeps at least one heard token to be judged against, so
+        "Ask Tim, hmm." heard "Ask him." stays a tim/him mismatch (NAMES), not a sound.
+    Each sound takes at most one heard form. A listed mishearing heard anywhere else is
+    left alone: it is judged as a word like any other."""
+    exp_keep = [True] * len(exp_tokens)
+    heard_keep = [True] * len(heard_tokens)
+    table = _sound_forms(nonlexical or {})
+    sounds = _find_expected_sounds(exp_tokens, table, proper) if table else []
+    if not sounds:
+        return exp_keep, heard_keep, 0, 0
+    is_sound = [False] * len(exp_tokens)
+    for s, e, _ in sounds:
+        for k in range(s, e):
+            is_sound[k] = True
+            exp_keep[k] = False
+
+    sm = difflib.SequenceMatcher(None, exp_tokens, heard_tokens, autojunk=False)
+    locked = [False] * len(heard_tokens)   # heard tokens matched to a lexical expected word
+    block_of = [None] * len(exp_tokens)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        for k in range(i1, i2):
+            block_of[k] = (tag, i1, i2, j1, j2)
+        if tag == 'equal':
+            for k in range(i1, i2):
+                if not is_sound[k]:
+                    locked[j1 + k - i1] = True
+
+    def spare(block, span):
+        """True if taking heard `span` leaves each lexical word of a replace block a token."""
+        tag, i1, i2, j1, j2 = block
+        if tag != 'replace':
+            return True
+        lexical = sum(not is_sound[k] for k in range(i1, i2))
+        free = sum(heard_keep[j] for j in range(j1, j2)) - sum(j1 <= j < j2 for j in span)
+        return free >= lexical
+
+    heard_count = 0
+    for s, e, forms in sounds:
+        anchors = {}
+        for k in range(s, e):
+            block = block_of[k]
+            tag, i1, i2, j1, j2 = block
+            if tag == 'equal':
+                anchors.setdefault(j1 + k - i1, block)
+            elif tag == 'replace':
+                anchors.setdefault(min(j1 + k - i1, j2 - 1), block)
+                anchors.setdefault(max(j2 - (i2 - k), j1), block)
+            # 'delete': nothing was heard for it
+        hit = False
+        for form in forms:
+            n = len(form)
+            for a in sorted(anchors):
+                for st in range(a - n + 1, a + 1):
+                    span = range(st, st + n)
+                    if st < 0 or st + n > len(heard_tokens):
+                        continue
+                    if tuple(heard_tokens[st:st + n]) != form:
+                        continue
+                    if any(locked[j] or not heard_keep[j] for j in span):
+                        continue
+                    if not spare(anchors[a], span):
+                        continue
+                    for j in span:
+                        heard_keep[j] = False
+                    hit = True
+                    break
+                if hit:
+                    break
+            if hit:
+                break
+        heard_count += hit
+    return exp_keep, heard_keep, len(sounds), heard_count
+
+
+def strip_nonlexical(exp_tokens, heard_tokens, nonlexical=None, proper=frozenset()):
+    """Remove expected sound tokens, and the heard tokens difflib aligns to them, before
+    scoring. Returns (exp', heard', count_expected, count_heard)."""
+    if nonlexical is None:
+        nonlexical = default_nonlexical()
+    ek, hk, n_exp, n_heard = nonlexical_masks(exp_tokens, heard_tokens, nonlexical, proper)
+    return ([t for t, k in zip(exp_tokens, ek) if k], [t for t, k in zip(heard_tokens, hk) if k],
+            n_exp, n_heard)
+
+
+def analyze(lines, heard_text, ignore_pairs, threshold, min_coverage_tokens=MIN_COVERAGE_TOKENS,
+            nonlexical=None):
     expected = [tok for ld in lines for tok in ld['tokens']]
     heard = normalize(heard_text)
+    # Allowlisted non-lexical sounds (config.NONLEXICAL, Decision 5) are optional: drop them,
+    # and only the heard tokens aligned with them, before any gate sees either stream. With
+    # no sound in the script nothing changes, down to the --json bytes.
+    if nonlexical is None:
+        nonlexical = default_nonlexical()
+    exp_keep, heard_keep, nonlex_expected, nonlex_heard = nonlexical_masks(
+        expected, heard, nonlexical, find_proper_words(lines))
+    if nonlex_expected and not any(exp_keep):
+        # A script of nothing but sounds has no words to verify: judge it as words, as
+        # before the allowlist, so silence can't pass it.
+        nonlex_expected = 0
+    if nonlex_expected:
+        pos, kept_lines = 0, []
+        for ld in lines:
+            n = len(ld['tokens'])
+            kept_lines.append({**ld, 'tokens': [t for t, k in zip(ld['tokens'], exp_keep[pos:pos + n]) if k]})
+            pos += n
+        lines = kept_lines
+        expected = [tok for ld in lines for tok in ld['tokens']]
+        heard = [t for t, k in zip(heard, heard_keep) if k]
     spans = line_spans_from(lines)
     spans_by_line = {sp['line']: sp for sp in spans}
     proper_words = find_proper_words(lines)
@@ -861,6 +1045,10 @@ def analyze(lines, heard_text, ignore_pairs, threshold, min_coverage_tokens=MIN_
     for ld in dropped:
         report_lines.append(f'L{ld["line"]} {ld["speaker"]}: DROPPED (no matched words) — "{ld["text"]}"')
 
+    if nonlex_expected:
+        # Informational only: a sound is optional, so neither count gates anything.
+        report_lines.append(f'NONLEXICAL {nonlex_heard}/{nonlex_expected} heard (optional sounds, not gated)')
+
     total_expected = len(expected)
     coverage = matched_total / total_expected if total_expected else 1.0
     # Below min_coverage_tokens the rate is too noisy to gate on (see
@@ -884,7 +1072,7 @@ def analyze(lines, heard_text, ignore_pairs, threshold, min_coverage_tokens=MIN_
         gates.append('NEGATION')
     ok = not gates
 
-    return {
+    result = {
         'coverage': coverage,
         'coverage_gated': coverage_gated,
         'min_coverage_tokens': min_coverage_tokens,
@@ -906,6 +1094,10 @@ def analyze(lines, heard_text, ignore_pairs, threshold, min_coverage_tokens=MIN_
         'ok': ok,
         'report_lines': report_lines,
     }
+    if nonlex_expected:
+        # Only when the script has a sound, so a sound-free script's --json is unchanged.
+        result['nonlexical'] = {'expected': nonlex_expected, 'heard': nonlex_heard}
+    return result
 
 
 # -------------------------------------------------------------------------- CLI
@@ -1288,6 +1480,177 @@ def run_selftest():
         with contextlib.redirect_stderr(buf2):
             write_transcript(p2, 'same', warn_stream=buf2)
         check('no warning when the existing transcript is identical', buf2.getvalue() == '')
+
+    # --- inline [pause N] (render.py renders it as silence inside the line): QA expects
+    # only the spoken words, and the line stays ONE line so "Wait." is never DROPPED.
+    with tempfile.TemporaryDirectory() as td:
+        sp = os.path.join(td, 'inline.txt')
+        with open(sp, 'w', encoding='utf-8') as f:
+            f.write("MAYA: The diagram shows air hitting the wing.\n"
+                    "[pause 1.2]\n"
+                    "ALEX: Wait. [pause 0.8] So the diagram is just wrong?\n")
+        il = parse_script_lines(sp)
+        check('inline pause: the line stays one line (2 dialogue lines, ALEX on line 3)',
+              [(ld['line'], ld['speaker']) for ld in il] == [(1, 'MAYA'), (3, 'ALEX')])
+        check('inline pause: the token is stripped from the expected text',
+              len(il) == 2 and il[1]['text'] == 'Wait. So the diagram is just wrong?')
+        check('inline pause: expected tokens are only the spoken words',
+              len(il) == 2 and il[1]['tokens'] == ['wait', 'so', 'the', 'diagram', 'is', 'just', 'wrong'])
+        check('a line without an inline pause keeps its text as before',
+              il[0]['text'] == 'The diagram shows air hitting the wing.')
+        r_in = analyze(il, 'The diagram shows air hitting the wing. Wait. So the diagram is just wrong.',
+                       set(), 0.96)
+        check('inline pause: the clean round-trip passes with nothing dropped and every '
+              'expected word heard (a stray "pause" token would leave one unmatched)',
+              r_in['ok'] is True and r_in['dropped_line_count'] == 0
+              and r_in['expected_token_count'] == r_in['matched_token_count'] == 14)
+        lit = os.path.join(td, 'literal.txt')
+        with open(lit, 'w', encoding='utf-8') as f:
+            f.write("MAYA: Hit [pause] then play.\n")
+        check('a bracket with no number ("[pause]") is dialogue, kept as before',
+              parse_script_lines(lit)[0]['text'] == 'Hit [pause] then play.')
+
+    # --- non-lexical allowlist (Decision 5, config.NONLEXICAL): an allowlisted sound is
+    # optional, and so is what whisper makes of it -- but only where difflib aligns it with
+    # the sound. Every other gate sees the lexical words exactly as before. A fixed map keeps
+    # these independent of config.py's list (which the shipped default reads).
+    nl = {'hmm': ['him', 'hm', 'mm'], 'uh-huh': ['uh huh', 'uhhuh'], 'huh': ['hi'], 'ha': ['ha ha', 'hah']}
+    snd = ('ALEX', 'Hmm. So the wind does the real work there?')
+    lex = [('MAYA', 'The sail is a wing, and the keel keeps the boat from sliding sideways.'),
+           ('ALEX', 'So the sail pulls the boat forward.')]
+
+    # (a) the sound and whisper's "him" for it: excused, nothing flagged, full coverage.
+    ra = analyze(mklines([snd] + lex), 'Him. So the wind does the real work there? The sail is a wing, '
+                 'and the keel keeps the boat from sliding sideways. So the sail pulls the boat forward.',
+                 set(), 0.96, nonlexical=nl)
+    check('(a) "Hmm" heard as "him" passes: ok, no report line but NONLEXICAL, coverage 1.0',
+          ra['ok'] and ra['coverage'] == 1.0 and ra['unmatched_heard_fraction'] == 0.0
+          and [rl for rl in ra['report_lines'] if not rl.startswith('NONLEXICAL')] == [])
+    check('(a) reported as NONLEXICAL 1/1 heard (informational), and in --json',
+          'NONLEXICAL 1/1 heard (optional sounds, not gated)' in ra['report_lines']
+          and ra['nonlexical'] == {'expected': 1, 'heard': 1})
+    ra0 = analyze(mklines([snd] + lex), 'Him. So the wind does the real work there? The sail is a wing, '
+                  'and the keel keeps the boat from sliding sideways. So the sail pulls the boat forward.',
+                  set(), 0.96, nonlexical={})
+    check('(a) control: with no allowlist the same audio flags "hmm" heard "him"',
+          any('expected "hmm" heard "him"' in rl for rl in ra0['report_lines']))
+    rsil = analyze(mklines([snd] + lex), 'So the wind does the real work there? The sail is a wing, '
+                   'and the keel keeps the boat from sliding sideways. So the sail pulls the boat forward.',
+                   set(), 0.96, nonlexical=nl)
+    check('(a) a sound whisper did not hear at all is optional: ok, coverage 1.0, NONLEXICAL 0/1',
+          rsil['ok'] and rsil['coverage'] == 1.0 and rsil['nonlexical'] == {'expected': 1, 'heard': 0})
+    rha = analyze(mklines([('ALEX', 'Ha. So the gentle turn is the one into the wind.')]),
+                  'Ha ha, so the gentle turn is the one into the wind.', set(), 0.96, nonlexical=nl)
+    check('(a) a multi-word mishearing ("ha ha" for "Ha") is excused as one sound',
+          rha['ok'] and rha['unmatched_heard_fraction'] == 0.0 and rha['nonlexical']['heard'] == 1)
+    ruh = analyze(mklines([('ALEX', 'Uh-huh. And the keel stops the slide.')]),
+                  'Uhhuh, and the keel stops the slide.', set(), 0.96, nonlexical=nl)
+    check('(a) "uh-huh" is one sound (not a lone "huh"), and "uhhuh" is excused for it',
+          ruh['ok'] and ruh['nonlexical'] == {'expected': 1, 'heard': 1} and ruh['unmatched_heard_fraction'] == 0.0)
+
+    # (b) a lexical line dropped beside a sound still fails DROPPED (the sound can't carry it).
+    rb = analyze(mklines([('ALEX', 'Hmm. Tell me why the keel matters.')] + lex),
+                 'Him. The sail is a wing, and the keel keeps the boat from sliding sideways. '
+                 'So the sail pulls the boat forward.', set(), 0.96, nonlexical=nl)
+    check('(b) the lexical words beside a heard sound dropped -> DROPPED on that line',
+          'DROPPED' in rb['gates'] and [d['line'] for d in rb['dropped_lines']] == [1])
+    rb2 = analyze(mklines([('ALEX', 'Hmm.'), ('MAYA', 'Tell me why the keel matters.')]),
+                  'Him.', set(), 0.96, nonlexical=nl)
+    check('(b) a lexical line after a sound-only line, both silent but the sound -> DROPPED',
+          'DROPPED' in rb2['gates'] and [d['line'] for d in rb2['dropped_lines']] == [2])
+
+    # (c) a stray "him" with no expected sound is still a word: reported, unmatched, gating.
+    stray_lines = mklines([('MAYA', 'We told the crew about the jibe before the turn.')])
+    rc = analyze(stray_lines, 'We told him about the jibe before the turn.', set(), 0.96, nonlexical=nl)
+    check('(c) a "him" with no sound in the script is still reported against "the crew"',
+          any('expected "the crew" heard "him"' in rl for rl in rc['report_lines'])
+          and 'nonlexical' not in rc)
+    rc2 = analyze(mklines([snd] + lex), 'Him. So the wind does the real work there? The sail is a wing, '
+                  'and the keel keeps him from sliding sideways. So the sail pulls the boat forward.',
+                  set(), 0.96, nonlexical=nl)
+    check('(c) with a sound elsewhere in the script, a "him" away from it still counts',
+          any('expected "the boat" heard "him"' in rl for rl in rc2['report_lines']))
+    rc3 = analyze(mklines([('MAYA', 'Hmm. Tell him the plan.')]), 'Him, tell him the plan.',
+                  set(), 0.96, nonlexical=nl)
+    check('(c) a real "him" right beside the sound is matched, never consumed as the sound',
+          rc3['ok'] and rc3['matched_token_count'] == rc3['expected_token_count'] == 4
+          and rc3['nonlexical']['heard'] == 1)
+    rlock = analyze(mklines([('MAYA', 'The... hmm, sail.')]), 'The hmm sail.', set(), 0.96,
+                    nonlexical={'hmm': ['the hmm']})
+    check('(c) a multi-word mishearing never consumes a heard word matched to a lexical word',
+          rlock['matched_token_count'] == rlock['expected_token_count'] == 2
+          and rlock['unmatched_heard_fraction'] == 0.0)
+    rc4 = analyze(mklines([('MAYA', 'Hmm. The sail fills.'), ('ALEX', 'So it pulls.')]),
+                  'The sail fills. So it pulls him.', set(), 0.96, nonlexical=nl)
+    check('(c) an extra "him" at the far end of the script is unmatched heard audio',
+          rc4['unmatched_heard_fraction'] > 0 and rc4['nonlexical'] == {'expected': 1, 'heard': 0})
+    rhi = analyze(mklines([('ALEX', 'Huh. So the sail is a wing.'), ('MAYA', 'Say hello to the jib.')]),
+                  'Hi. So the sail is a wing. Say hi to the jib.', set(), 0.96, nonlexical=nl)
+    check('(c) "hi" excused where "Huh" is, but a "hi" for "hello" elsewhere still flags',
+          rhi['nonlexical']['heard'] == 1
+          and any('expected "hello" heard "hi"' in rl for rl in rhi['report_lines']))
+
+    # (c) a lexical word whisper hears as a sound's form keeps its heard token: in a replace
+    # block every lexical word keeps a counterpart, so the sound can't swallow the mishearing.
+    for script_t, heard_t in (('Ask Tim, hmm.', 'Ask him.'), ('So we ask Tim. Hmm.', 'So we ask him.'),
+                              ('Ask Tim, ha!', 'Ask hah.')):
+        rt_ = analyze(mklines([('MAYA', script_t), ('ALEX', 'Tim knows the boat.')]),
+                      heard_t + ' Tim knows the boat.', set(), 0.96, nonlexical=nl)
+        check(f'(c) "{script_t}" heard "{heard_t}": "tim" still fails NAMES, the sound takes nothing',
+              'NAMES' in rt_['gates'] and rt_['nonlexical']['heard'] == 0)
+    rbay = analyze(mklines([('MAYA', 'We sailed to Ha Long Bay.'), ('ALEX', 'Ha Long Bay is calm.')]),
+                   'We sailed to hah long bay. Hah long bay is calm.', set(), 0.96, nonlexical=nl)
+    check('(c) a name spelled like a sound ("Ha Long Bay") is not a sound: NAMES still fails',
+          'NAMES' in rbay['gates'] and 'nonlexical' not in rbay)
+    rwide = analyze(mklines([('MAYA', 'Hmm. The sail fills.')]), 'Oh the him sail fills.',
+                    set(), 0.96, nonlexical=nl)
+    check('(c) a "him" two tokens from the sound is not its form: unmatched, sound 0/1',
+          rwide['nonlexical'] == {'expected': 1, 'heard': 0} and rwide['unmatched_heard_fraction'] > 0)
+    rleft = analyze(mklines([('MAYA', 'Hmm, Bob sails the jib.')]), 'Him a Rob sails the jib.',
+                    set(), 0.96, nonlexical=nl)
+    check('(a) a sound at the left of a replace block takes its form there (left anchor)',
+          rleft['nonlexical']['heard'] == 1 and not any('him' in o['heard'] for o in rleft['ops']))
+    rright = analyze(mklines([('MAYA', 'So we trim the jib, hmm.')]), 'So we trim the jab a him.',
+                     set(), 0.96, nonlexical=nl)
+    check('(a) a sound at the right of a replace block takes its form there (right anchor)',
+          rright['nonlexical']['heard'] == 1 and not any('him' in o['heard'] for o in rright['ops']))
+    rrep = analyze(mklines([('ALEX', 'Ha ha ha. So the gentle turn wins.')]), 'Ha ha ha, so the gentle turn wins.',
+                   set(), 0.96, nonlexical=nl)
+    check('(a) a written repeat ("Ha ha ha") is one sound, heard whole',
+          rrep['ok'] and rrep['nonlexical'] == {'expected': 1, 'heard': 1}
+          and rrep['unmatched_heard_fraction'] == 0.0)
+    rpart = analyze(mklines([('ALEX', 'Uh-huh. So the keel stops it.')]), 'Huh, so the keel stops it.',
+                    set(), 0.96, nonlexical=nl)
+    check('(a) part of a multi-word sound ("huh" for "Uh-huh") is excused, no EXTRA AUDIO',
+          rpart['ok'] and rpart['nonlexical'] == {'expected': 1, 'heard': 1})
+    ronly = analyze(mklines([('ALEX', 'Hmm.'), ('MAYA', 'Ha.')]), '', set(), 0.96, nonlexical=nl)
+    check('(b) a script of nothing but sounds, with nothing heard, still fails DROPPED',
+          'DROPPED' in ronly['gates'] and not ronly['ok'])
+
+    # (d) a script with no sound: analysis identical with and without the allowlist, even when
+    # whisper produces every listed mishearing.
+    for sl, heard_d in ((lines, heard2), (stray_lines, 'We told him hm hi about the jibe before the turn.'),
+                        (mklines(lex), 'The sail is a wing ha, and the keel keeps the boat from '
+                         'sliding sideways. So uh huh the sail pulls the boat forward.')):
+        same = analyze(sl, heard_d, set(), 0.96, nonlexical=nl) == analyze(sl, heard_d, set(), 0.96, nonlexical={})
+        check(f'(d) sound-free script: identical result with or without the allowlist ({heard_d[:24]!r})', same)
+
+    # "Mm-hm" is not allowlisted (L14; pacecheck's BANNED_SOUND): its tokens are lexical, as before.
+    mm_lines = mklines([('ALEX', 'Mm-hm. So Bernoulli and Newton agree?')])
+    check('"Mm-hm" is not excused: same result as with no allowlist at all',
+          analyze(mm_lines, 'So Bernoulli and Newton agree?', set(), 0.96, nonlexical=nl)
+          == analyze(mm_lines, 'So Bernoulli and Newton agree?', set(), 0.96, nonlexical={}))
+    check('strip_nonlexical: expected sounds go, aligned heard form goes, counts returned',
+          strip_nonlexical(['hmm', 'so', 'it', 'lifts'], ['him', 'so', 'it', 'lifts'], nl)
+          == (['so', 'it', 'lifts'], ['so', 'it', 'lifts'], 1, 1))
+    if config is not None:
+        check('the default allowlist is config.NONLEXICAL', default_nonlexical() is config.NONLEXICAL)
+    saved_config = config
+    try:
+        globals()['config'] = None
+        check('no config module: no allowlist, QA as before', default_nonlexical() == {})
+    finally:
+        globals()['config'] = saved_config
 
     # --- no-dialogue-lines / swapped-args guard, via the real CLI
     with tempfile.TemporaryDirectory() as td:

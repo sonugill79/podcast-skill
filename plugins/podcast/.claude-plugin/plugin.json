@@ -1,7 +1,7 @@
 {
   "name": "podcast",
   "description": "Research any topic and turn it into a verified, podcast-style MP3 \u2014 parallel research agents, claims re-checked against primary sources, a script written for the ear, local text-to-speech, and a whisper round-trip that catches dropped or garbled audio. Pick a cast (two hosts, a solo narrator, or a three-voice panel that argues a question from both sides) and get a tagged, chaptered episode. Works with nothing installed (it writes the script); upgrade voices and QA when you want them.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": {
     "name": "Sonu Gill"
   },
@@ -32,6 +32,18 @@
       "type": "string",
       "description": "Who hosts an episode when the request doesn't say: two-host (a host and a co-host), panel (moderator, advocate and skeptic \u2014 used automatically for debates) or solo (one narrator). Any name in casts/ works. Change later with: /podcast --cast <name>",
       "default": "two-host"
+    },
+    "default_pacing": {
+      "title": "Default pacing",
+      "type": "string",
+      "description": "How long the silences are: relaxed (default) \u2014 a short beat after every sentence and a longer one when the speaker changes. brisk \u2014 the tighter 0.2.0 timing, one short gap between lines. spacious \u2014 longer beats still.",
+      "default": "relaxed"
+    },
+    "default_level": {
+      "title": "Default level",
+      "type": "string",
+      "description": "How much you already know about a topic: informed (default) — the basics are assumed, new or contested terms are explained. intro — every term explained, one picture per idea, a recap each segment. expert — nothing standard explained; the hosts go straight to mechanisms, trade-offs and edge cases. Change for one episode with: /podcast <topic> --level <level>",
+      "default": "informed"
     },
     "voice_blocklist": {
       "title": "Voices to never use",

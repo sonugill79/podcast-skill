@@ -1,0 +1,120 @@
+# Task Prompt — Phase Human Touch, Milestone 4.1
+
+You are the sub-agent implementing ONE milestone. The orchestrating session owns the plan, the Progress table and every commit.
+
+- **Plan:** `docs/phases/phase-human-touch/phase-human-touch-implementation-plan.md` · **Decisions (locked):** `docs/phases/phase-human-touch/phase-human-touch-decisions.md` · **PRD:** `docs/phases/phase-human-touch/phase-human-touch-requirements.md`
+- **Hazards & Verify-First:** read that section of `docs/phases/phase-human-touch/phase-human-touch-resume-prompt.md` before you start.
+- Write ONLY inside this milestone's **Owns** set. Do not edit the plan's Progress table, and do not commit. Leave your changes in the working tree for the orchestrator.
+- The plan is a hypothesis, and so are these instructions. The orchestrator's error rate is not lower than yours. Report every instruction-versus-reality mismatch as a finding, and refuse on the merits when an instruction is wrong.
+- Final report: what changed (files), every acceptance criterion with its CHECK command and actual EVIDENCE output, and a **DEVIATIONS** section (write "none" if there are none).
+
+## Phase context
+
+### Phase 4: Emotion & point of view
+**Goal:** Let reaction sounds through QA without loosening it, and carry roles and stances into every cast.
+**Rollback:** remove `NONLEXICAL` from the `qa.py` lookup (one line), or revert the commit. Cast prose reverts independently.
+
+## Milestone (verbatim from the plan)
+
+#### Milestone 4.1: `qa.py` non-lexical allowlist (M)
+
+**Objective:** Allowlisted sounds (and their mishearings) are optional: not required, not EXTRA AUDIO. Nothing else changes.
+**Owns:** `plugins/podcast/skills/podcast/scripts/qa.py`
+**Tier:** opus — touches the QA gate, which is what makes "verification is the product" hold · **Review:** opus
+
+**Tasks:**
+1. Normalise both sides. Drop allowlisted tokens from the **expected** stream, and drop the canonical sound or any of
+   its mishearings from the **heard** stream, only at positions aligned with an expected sound (a mishearing such as
+   "him" elsewhere stays a real word).
+2. Report them as `NONLEXICAL n/m heard` (informational).
+3. Selftests: (a) an allowlisted line plus whisper's "him" passes; (b) a lexical line dropped beside a sound still
+   fails DROPPED; (c) a stray "him" with no expected sound still counts; (d) coverage is unchanged on a script with
+   no sounds; (e) red demonstrations for (b) and (c).
+4. Step 2.6: the existing ignore-pair mechanism was considered and rejected for this. Ignore pairs are exact
+   per-word substitutions and can't express "optional". Record that in DEVIATIONS.
+
+**Code Template:**
+
+```python
+# qa.py   [Sketch] — the behaviour in the AC is the contract, not this shape
+def strip_nonlexical(exp_tokens, heard_tokens, nonlexical=config.NONLEXICAL):
+    """Remove expected sound tokens, and the heard tokens difflib aligns to them, before scoring.
+    Returns (exp', heard', count_expected, count_heard)."""
+```
+
+**Acceptance Criteria:**
+- [ ] All five selftests pass, with the reds demonstrated. EVIDENCE: pending
+- [ ] Re-run QA on the 1.2 rescript: the previously listed non-lexical flags are gone, 0 new flags. EVIDENCE: pending
+- [ ] `qa.py` output on a sound-free script is byte-identical to `main`. EVIDENCE: pending
+
+**Testing Strategy:** Unit as above. Integration: real whisper on the 1.2 render. Declared: CI selftests.
+
+---
+
+## Cross-Cutting Rules (verbatim — apply all of them)
+
+```
+- Nothing personal ships: no names, handles, employers, projects, hostnames, tokens, chat ids or /home/<user>
+  paths outside PLAN.md, CLAUDE.md and LICENSE. Run the CI privacy grep before every commit, including docs/.
+- Tier 0 must always work: no new step may require a voice engine, ffmpeg or QA to produce a script.
+- No sudo; no system packages; no new third-party Python dependencies (stdlib only in scripts).
+- Verification is the product: facts trace to sources.md; opinions are marked as opinions and never carry an
+  unverified fact; QA strictness is never lowered except by the exact allowlist in Decision 5.
+- Exit codes: 2 = bad input, 3 = not installed, 4 = pacecheck --strict failure. Never reuse 3.
+- Gaps are not in the TTS cache key. Never add them to it, and never bump CACHE_VERSION for a gap change.
+- `brisk` reproduces 0.2.0 audio sample for sample (compare decoded PCM, not MP3 bytes, which carry a date tag). Any change that breaks this is a defect.
+- Every user-visible change ships with a version bump in BOTH plugin.json and marketplace.json (done once, in 6.2).
+- The primary checkout stays on main. Work in a worktree; commit there; merge into main. Nothing is pushed to the
+  public repo without the owner's explicit go-ahead.
+- Never overwrite an existing episode's script or audio. Write beside it.
+- No demeaning comparisons or stigmatising language about health or identity in any cast, rule or fixture.
+- Seams (one owner each): SKILL.md sections — 1.1 owns §1/§4, 4.2 owns §3 end + the --pacing usage line, 5.1 owns
+  §Invocation depth + §2, 3.2 owns the §4 budget line. config.py — 2.1 NONLEXICAL, 3.1 default_pacing,
+  5.1 default_level. plugin.json — 3.1/5.1 userConfig entries, 6.2 version.
+```
+
+## Universal Clauses (verbatim — apply all of them)
+
+```
+- If two sources of truth (mockups, PRD, decisions doc) disagree, STOP and
+  surface the conflict as a decision for the orchestrator. Never pick one silently.
+- Never render a clickable affordance without a working handler. If the function
+  isn't built, omit the element. A missing button reads as "not done yet"; a dead
+  button reads as "broken." If an action can be a spatial no-op (navigating to
+  where you already are), give it a visible effect anyway — scroll, flash, focus.
+- All reads of shared/divergent data shapes go through the project's normalizer
+  layer (see the repo's phase-gates addendum for which one). When legacy semantics
+  differ, EXTEND the normalizer — never inline an ad-hoc derivation.
+- Any deviation, limitation, or scope cut you make MUST be stated in a clearly
+  marked "DEVIATIONS" section of your final report, even if intentional.
+- If your change introduces a loop containing a database or network call,
+  either batch it or state in DEVIATIONS why batching is not appropriate
+  here. Likewise for a polling loop where the backend offers a
+  subscription/realtime channel, and for a route that sets both
+  `force-dynamic` and a `revalidate` interval (the latter never runs). This
+  is a justification requirement, not a ban — bounded loops and per-row
+  conflict handling are legitimate when you say so.
+- If your change writes a string into HTML or script context —
+  `dangerouslySetInnerHTML`, `innerHTML`/`outerHTML`/`insertAdjacentHTML`,
+  `document.write`, a JSON blob inside a `<script>` tag, or a template string
+  assembled into markup — name in DEVIATIONS the escaping function the data
+  passes through and the `file:line` where it lives. A code comment
+  asserting the data is "sanitized" is not a trace, and
+  a field allowlist is not an escaper — it chooses which fields survive and
+  copies their contents verbatim. If nothing on the path escapes, say so
+  rather than assuming something upstream does. This is a trace requirement,
+  not a ban — JSON-LD and other deliberate markup injection are legitimate
+  once you name the escaper.
+- Do not tick a box you cannot prove. Every acceptance criterion you mark done
+  names the command you ran and its actual output; a tick whose evidence reads
+  "pending" is UNMET, and worse than an empty box, because it reads as done and
+  stops anyone re-checking. If you finished something the plan does not list,
+  add the row — or, if you are a sub-agent, report it in DEVIATIONS for the
+  orchestrator to add, since the plan table is outside your `Owns` set and only
+  the orchestrator commits (Step 6). Unrecorded work is the same defect facing
+  the other way.
+- Before writing a general-purpose component from scratch (date picker, table,
+  modal, parser, retry/backoff, queue, auth flow), name in DEVIATIONS the
+  existing library or in-repo module you checked and why it does not fit.
+  "Build it" is a fine answer; not having looked is not.
+```

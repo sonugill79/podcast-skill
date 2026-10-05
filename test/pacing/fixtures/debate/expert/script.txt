@@ -1,0 +1,52 @@
+# FICTIONAL eval fixture: debate, level expert, cast panel. Facts trace to ../sources.md.
+# ── 1. The question ─────
+HOST: I'm Iris, and today we're asking whether Ashgrove should replace its night buses with on-demand shuttles, city-wide. Marcus makes the case for it. Nora argues the other side. My job is to keep them both honest, and to tell you at the end where the evidence actually points.
+ADVOCATE: Happy to be here. I think this one is clearer than people admit.
+SKEPTIC: And I think Marcus is about to overstate it.
+---
+# ── 2. The contested floor ─────
+HOST: The pilot facts aren't in dispute. One district, twelve months, three routes. What's contested is what they license. Shuttle waits averaged eleven minutes. The buses ran every thirty. Picture two receipts side by side on a counter. Fourteen dollars for a shuttle trip. Nine for a bus trip. Marcus, would you take the cost figure as given?
+ADVOCATE: As reported, yes. With a caveat. About a fifth of the fourteen is one-off software set-up.
+HOST: Nora, you'd accept that split?
+SKEPTIC: I would. It's in the annex.
+HOST: Okay. So even net of set-up, my arithmetic says about eleven dollars against nine.
+ADVOCATE: It does. Fair. That's the hard number for my side.
+HOST: So that's the floor nobody here disputes. Eleven-minute average waits, buses every thirty, and a more expensive trip for the city.
+[pause 2]
+---
+# ── 3. The case for ─────
+ADVOCATE: Iris, here's the case. I think the service variable that matters at night is wait time. The buses came every thirty minutes. The shuttle's average wait was eleven.
+HOST: Average, though. Not the tail.
+ADVOCATE: Average. The report doesn't publish the spread. But ridership in the district rose twenty-two percent.
+HOST: Wait. [pause 0.7] Twenty-two, in a single year?
+ADVOCATE: In a single year. The pilot lead, Sam Porter, put it plainly. Quote. "Nobody should wait half an hour at midnight."
+[pause 1.5]
+HOST: So your case rests on elasticity to wait time?
+ADVOCATE: It does. Picture a bus stop at midnight, with thirty minutes on the clock. My read? Even a partial effect justifies scaling, with a second pilot running alongside. An eleven-minute wait, against a bus every thirty. That's the case.
+[pause 2]
+---
+# ── 4. The case against ─────
+SKEPTIC: Iris, my case is about who the service is for. Riders over sixty-five fell from fifteen percent of night riders to nine. That's from a survey of four hundred and twelve.
+HOST: Hold on. [pause 0.7] Four hundred and twelve responses?
+SKEPTIC: Four hundred and twelve. I'd call that a small sample. So I read the age shift as indicative, not precise. And twelve percent of trips were phone bookings. The rest went through the app. I think booking friction explains part of the drop. That's my inference. The report doesn't test it.
+SKEPTIC: The riders union's chair, Lena Park, said it plainly. Quote. "A bus you can see is a bus you can trust."
+[pause 1.5]
+HOST: So your case rests on distribution, not the average?
+SKEPTIC: Yes. Picture the survey as four hundred and twelve people in one hall. Honestly, an average hides who the service reaches. A smaller share of older riders, at a higher cost. That's my case.
+[pause 2]
+---
+# ── 5. Cross-examination ─────
+SKEPTIC: Marcus. Your twenty-two percent. The district also got a late-night food market that year. Picture the map with that market on it. The report doesn't separate the two.
+ADVOCATE: Okay. That's the weak part of my case. It's confounded.
+SKEPTIC: And the report's own caveat, quote, "One district, one year, and a mild winter."
+[pause 1.5]
+ADVOCATE: Fair, Nora. But your age figure is one survey of four hundred and twelve. My read is that's thin evidence too.
+SKEPTIC: Agreed. I'd still put the falling share of older riders first.
+ADVOCATE: And I'd put the eleven-minute wait first.
+HOST: So the numbers are shared, and the priorities aren't.
+---
+# ── 6. Where the evidence points ─────
+HOST: One thing we couldn't verify. A local radio report said the vendor wants a ten-year contract. Unconfirmed.
+[pause 2.5]
+HOST: Where the evidence points today. An effect on ridership that's plausible but confounded. A cost premium that survives removing set-up. An age shift from a modest survey. One district, one year with a mild winter.
+HOST: It doesn't support a city-wide switch yet. A second district with no new food market, through a hard winter, would. The line to keep. Eleven-minute average waits, confounded on ridership, and one district deep.

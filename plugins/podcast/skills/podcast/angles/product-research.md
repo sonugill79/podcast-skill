@@ -31,6 +31,17 @@ included), the trust and lock-in risks, and a clear verdict for their use case.
 8. Verdict: buy / try / skip, with the conditions that would flip it (11%)
 9. Wrap: what to test in a trial, what couldn't be verified (5%)
 
+## Level notes
+`brief.md` `level:` sets the pitch (SKILL.md §Invocation).
+
+| Level | Assumes | Explain or add | Skip or shorten |
+|---|---|---|---|
+| intro | new to the category | What the category is and the problem it solves; the category's terms (self-hosted, single sign-on, rate limit) in plain words; what a trial should test and why | Architecture internals; licence and compliance detail beyond what it means for the listener |
+| informed (default) | the category's basics | New or contested terms only | Nothing: the outline as written |
+| expert | has run comparable tools | Architecture and limits, failure modes, migration and exit mechanics, integration edge cases, where pricing breaks at scale, licence specifics | What the category is; feature tours; the ninety-second overview compresses |
+
+Level never changes verification: the must-verify list below, SKILL.md §3 and `sources.md` tracing are the same at every level, and so is saying what couldn't be verified. Where SKILL.md §4's lesson shape applies, it holds at every level: the level changes what the learner's puzzle and wrong guess are, never whether the guess comes from `sources.md`.
+
 ## Must verify yourself
 - Pricing and plan limits from the vendor's own page via `rawfetch.py --grep`, with the date.
 - Feature claims against current docs (not marketing, not old reviews).

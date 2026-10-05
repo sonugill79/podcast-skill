@@ -1,0 +1,60 @@
+# FICTIONAL eval fixture: debate, level intro, cast panel. Facts trace to ../sources.md.
+# ── 1. The question ─────
+HOST: I'm Iris, and today we're asking whether Ashgrove should replace its night buses with on-demand shuttles, city-wide. Making the case for is Marcus. Arguing the other side is Nora. My job is to keep them both honest, and to tell you at the end where the evidence actually points.
+ADVOCATE: Happy to be here. I think this one is clearer than people admit.
+SKEPTIC: And I think Marcus is about to overstate it.
+---
+# ── 2. What nobody disputes ─────
+HOST: First, some words. An on-demand shuttle is a van you book by app or by phone call. It picks you up at a street corner near you, within four hundred metres, rather than at your door.
+[pause 1.2]
+HOST: Last year the city ran a pilot, which means a trial run. For one year, three night bus routes in one district became shuttles.
+HOST: Shuttle waits averaged eleven minutes. The buses had come every thirty. Marcus, you'd accept those numbers?
+ADVOCATE: I would. They're the city's own.
+HOST: Then the cost per trip. That's what the city spends for each single ride. Fourteen dollars by shuttle. Nine by bus.
+ADVOCATE: Fourteen against nine. Fair. That's the hard number for my side.
+HOST: Nora, you'd accept those numbers too?
+SKEPTIC: I would. None of it is in dispute.
+HOST: So that's the floor nobody here disputes. Eleven-minute shuttle waits, buses every thirty, and a more expensive trip for the city.
+[pause 2]
+---
+# ── 3. The case for ─────
+ADVOCATE: Iris, here's the case. I think thirty minutes at a bus stop at midnight is a long time. Shuttle waits averaged eleven minutes. The buses ran every thirty.
+HOST: Eleven, against a bus every thirty.
+ADVOCATE: And people came. Night ridership in the district rose twenty-two percent.
+HOST: Marcus, ridership means what, exactly?
+ADVOCATE: How much the service gets used. In the pilot district, night ridership rose twenty-two percent.
+HOST: Wait. [pause 0.7] More than a fifth more, in one year?
+ADVOCATE: In one year. The pilot lead at the transit office, Sam Porter, put it like this. Quote. "Nobody should wait half an hour at midnight."
+[pause 1.5]
+HOST: So your case rests on the wait time?
+ADVOCATE: On the wait, and on the ridership rise that came with it. Picture a bus stop at midnight, with thirty minutes on the clock. My read? That's what a night service is for. An eleven-minute wait, against a bus every thirty. That's the case.
+[pause 2]
+---
+# ── 4. The case against ─────
+SKEPTIC: Iris, my case starts with money. The shuttle cost the city fourteen dollars per trip. The bus cost nine.
+HOST: Five dollars more per trip, by my arithmetic.
+SKEPTIC: And look at who rode. Riders over sixty-five fell from fifteen in every hundred night riders to nine.
+HOST: Hold on. [pause 0.7] Fifteen down to nine?
+SKEPTIC: Fifteen to nine. And only twelve trips in every hundred were booked by phone call. The rest were booked in the app. I think the app is part of why. The report doesn't prove that.
+SKEPTIC: The riders union's chair, Lena Park, put it simply. Quote. "A bus you can see is a bus you can trust."
+[pause 1.5]
+HOST: So your case rests on cost, and on who the service reaches?
+SKEPTIC: Both. Picture a corner at midnight, and a rider with no app. Honestly, a night service has to work for the riders with no other way home. Fourteen dollars, not nine, and a smaller share of older riders. That's my case.
+[pause 2]
+---
+# ── 5. Cross-examination ─────
+SKEPTIC: Marcus. Picture the city map with one district lit and the rest dark. One district. One year. The report itself says, quote, "One district, one year, and a mild winter."
+[pause 1.5]
+ADVOCATE: Fair, Nora. It's one district. My read is it's still the best evidence anyone has.
+SKEPTIC: And the cost? Fourteen against nine.
+ADVOCATE: About a fifth of that fourteen was setting up software, once.
+SKEPTIC: Okay. I'll grant you that one. Even without it, my arithmetic says about eleven dollars against nine.
+ADVOCATE: It does. I think an eleven-minute wait is worth it.
+SKEPTIC: I'd say not, given the smaller share of older riders.
+HOST: So you agree on every number, and not on what they're worth.
+---
+# ── 6. Where the evidence points ─────
+HOST: A local radio report said the shuttle company wants a ten-year contract. We couldn't confirm it.
+[pause 2.5]
+HOST: Where the evidence points today. Night ridership rose. The cost per trip was higher, and fewer of the riders were older people. All of it from one district, in one year with a mild winter.
+HOST: It doesn't settle a city-wide switch yet. A second district, or a hard winter, would change that. The line to keep. Eleven-minute waits, dearer trips, a smaller share of older riders, and only one district deep.

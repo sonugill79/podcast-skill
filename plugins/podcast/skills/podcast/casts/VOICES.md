@@ -78,7 +78,7 @@ What to reach for when the request names a kind of show rather than a role.
 | Debate / panel | `panel` — `bf_lily` host, `am_adam` advocate, `af_kore` skeptic |
 | Interview prep, company diligence | `two-host` with `af_aoede` + `am_adam` — clear and businesslike |
 | History, long documentary | `solo` with `bm_george`; `am_onyx` when it wants gravitas |
-| Daily news brief | `solo` with `bm_daniel` or `bf_emma` — fast, no dwelling |
+| Daily news brief | `solo` with `bm_daniel` or `bf_emma`, rendered with `--pacing brisk` — fast, no dwelling |
 | Sleep, meditation, wind-down | `solo` with `af_nicole`, and nothing else |
 | True crime, investigation | `solo` with `am_onyx` or `bm_lewis` |
 | Kids, fiction, storytelling | `two-host` with `bm_fable` + `af_bella` |
