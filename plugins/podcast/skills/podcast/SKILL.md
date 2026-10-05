@@ -28,6 +28,11 @@ the better voice is downloading and that this episode may still be in the old on
 render time, the next render picks kokoro up by itself. Someone who set `voice_engine: piper` on purpose is left
 alone, and so is `auto_setup: never`.
 
+**QA installed but needs a repair** — the QA row says `(needs repair)` and `auto_setup.repairs` lists it (an
+outside library update broke file decoding; ~35 MB, the model is kept). Same handling: `autosetup` in the background
+(it reinstalls `qa-<active level>`), one line saying so, never delay the episode. Under `auto_setup: never`, offer it
+instead. Until it is fixed qa.py exits 3 with "needs a repair" rather than crashing.
+
 **Something missing** — the user asked for an episode, not a shopping list. Unless `auto_setup` is `never`:
 
 1. Launch `bash SCRIPTS/setup.sh autosetup` **in the background, immediately**. It installs what's missing in
@@ -56,7 +61,7 @@ These phrases still work if someone wants to drive it manually:
 | `upgrade audio` | `bash SCRIPTS/setup.sh install audio` — ffmpeg plus the kokoro voice |
 | `upgrade voice` | `bash SCRIPTS/setup.sh install voice-kokoro` (~521 MB, best quality — the default) or `voice-piper` (~375 MB, faster, noticeably thinner) |
 | "what do the voices sound like" | `python3 SCRIPTS/audition.py out.mp3 --grep af_,am_,bf_,bm_` — every English voice reads the same line, with measured pitch/pace/level in a JSON beside it. See `casts/VOICES.md` |
-| `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (~575 MB); `qa-small` and `qa-medium` are larger and more accurate |
+| `upgrade qa` | `bash SCRIPTS/setup.sh install qa-base` (~575 MB); `qa-small` and `qa-medium` are larger and more accurate. **If the QA row says `(needs repair)`** (or `status --json` lists it in `auto_setup.repairs`): `bash SCRIPTS/setup.sh install qa-<the active level, qa.active> --yes` instead, never `qa-base` — a ~35 MB repair that keeps the model; say so in one line |
 | `stop installing things` | `python3 SCRIPTS/config.py set auto_setup=never` |
 | `configure telegram` | Needs `~/.config/telegram-send/bots.json`; then `python3 SCRIPTS/config.py set telegram_bot=<name>` |
 | `status`, "what do I have" | `bash SCRIPTS/setup.sh status` |
@@ -157,7 +162,8 @@ fixing a few lines re-renders only those.
 ## 6. QA
 `python3 SCRIPTS/qa.py <script> <out.mp3>` compares the audio against the script and fails on: DROPPED or TRUNCATED
 lines, MISSING runs of 4+ words, EXTRA AUDIO (repeats, wrong-line audio), misheard NAMES, lost or added NEGATIONS, or
-coverage below 0.96. Exit 3 means QA isn't installed — offer `upgrade qa`.
+coverage below 0.96. Exit 3 means QA isn't installed — offer `upgrade qa`; if the message says "needs a repair",
+offer the ~35 MB repair (`install qa-<active level>`, see the table above), not a fresh ~575 MB install.
 - Structural failures mean **re-render**, never an ignore rule.
 - For a NAMES flag, render the word alone and transcribe it: if the voice is wrong add a `lexicon.txt` rule and
   re-render; if only the transcriber is wrong add a `qa-ignore.txt` pair.

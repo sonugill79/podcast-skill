@@ -37,6 +37,7 @@ CLI:
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -124,6 +125,15 @@ VOICE_DOWNLOAD_BYTES = {"piper": 314_000_000, "kokoro": 474_000_000}  # approx.
 VOICE_DISK_BYTES = {"piper": 375_000_000, "kokoro": 521_000_000}
 QA_DOWNLOAD_BYTES = {"base": 528_000_000, "small": 870_000_000, "medium": 1_750_000_000}  # approx.
 QA_DISK_BYTES = {"base": 575_000_000, "small": 950_000_000, "medium": 1_900_000_000}
+# Repairing an incompatible av in an existing qa install (see _qa_runtime_problem and
+# setup.sh's AV_PIN): one wheel, ~35 MB (av 18.1.0 manylinux x86_64; macOS is smaller).
+# It replaces the av already in the venv, so the on-disk footprint barely moves; the
+# download size is used for both so the announcement never undersells it.
+QA_REPAIR_BYTES = 35_000_000
+#: First av major version faster-whisper 1.2.1 cannot read audio files with (av 19.0.0
+#: removed av.open(metadata_errors=...), which faster_whisper/audio.py passes).
+#: Must match AV_BROKEN_MAJOR in setup.sh.
+AV_BROKEN_MAJOR = 19
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +555,63 @@ def _ok_or_probe_qa_level(rec, level):
     return True
 
 
+def _venv_site_packages(venv_dir):
+    """The venv's LIVE site-packages dir (the one its python actually imports from), or
+    None if it can't be told. The Python version comes from pyvenv.cfg (`version` /
+    `version_info`, written by `python -m venv`), falling back to the venv's own
+    bin/python3.X. Never a glob over every lib/python*/: a stale dir left by an older
+    Python (venv re-created, or the system Python upgraded) is not imported from, and
+    an old av there must not report a repair that no install can ever clear."""
+    mm = None
+    try:
+        with open(os.path.join(venv_dir, "pyvenv.cfg"), encoding="utf-8") as f:
+            for line in f:
+                key, _, val = line.partition("=")
+                if key.strip() in ("version", "version_info"):
+                    m = re.match(r"\s*(\d+)\.(\d+)", val)
+                    if m:
+                        mm = f"{m.group(1)}.{m.group(2)}"
+                        break
+    except OSError:
+        pass
+    if mm is None:
+        cands = sorted(os.path.basename(p)[len("python"):]
+                       for p in glob.glob(os.path.join(venv_dir, "bin", "python3.*"))
+                       if re.fullmatch(r"python3\.\d+", os.path.basename(p)))
+        if len(cands) == 1:
+            mm = cands[0]
+    if mm is None:
+        return None
+    sp = os.path.join(venv_dir, "lib", f"python{mm}", "site-packages")
+    return sp if os.path.isdir(sp) else None
+
+
+def _qa_runtime_problem():
+    """None if the venv's faster-whisper runtime has no KNOWN incompatibility, else a
+    short description of what's wrong (e.g. "av 19.0.1"). Found 2026-10-04: a fresh
+    install got av 19 (faster-whisper only declares av>=11), whose av.open() no longer
+    takes the metadata_errors argument faster-whisper 1.2.1 passes -- so the model and
+    package were all present and importable, yet every transcription of a file died
+    with TypeError. Read from the dist-info directory names in the venv's live
+    site-packages (no subprocess, no import), so it costs nothing on every status call
+    and still sees an av that cannot be imported at all. If several av dist-info dirs
+    exist (an interrupted pip can leave two), ANY incompatible one is flagged -- which
+    one Python's metadata lookup sees first is not something to bet QA on; setup.sh's
+    repair removes every one of them before reinstalling."""
+    py = venv_python()
+    if not py:
+        return None
+    sp = _venv_site_packages(os.path.dirname(os.path.dirname(py)))
+    if not sp:
+        return None
+    for d in sorted(glob.glob(os.path.join(sp, "av-*.dist-info"))):
+        version = os.path.basename(d)[len("av-"):-len(".dist-info")]
+        major = version.split(".", 1)[0]
+        if major.isdigit() and int(major) >= AV_BROKEN_MAJOR:
+            return f"av {version}"
+    return None
+
+
 def _best_installed(levels, installed_pred):
     """levels: worst->best level names, NOT including 'none'. The best (last) level
     for which installed_pred is True, or None if nothing is installed."""
@@ -620,6 +687,12 @@ def detect():
 
     qa_models = [lvl for lvl in QA_LEVELS[1:] if _ok_or_probe_qa_level(rec, lvl)]
     qa_active = _resolve_active(QA_LEVELS[1:], cfg["qa_level"], lambda lvl: lvl in qa_models)
+    # Models present but the runtime can't decode a file: faster_whisper is reported
+    # NOT ready (so qa.py exits 3 "run upgrade qa" instead of crashing with a
+    # traceback on every episode), while models/qa_active still say what is installed
+    # -- status() and the planner turn that into a small named repair, not a
+    # ~575 MB "not installed".
+    qa_repair = _qa_runtime_problem() if qa_models else None
 
     sd = state_dir()
     ffmpeg_path, ffprobe_path, ffmpeg_source = _ffmpeg_detect()
@@ -640,8 +713,9 @@ def detect():
             # (Go/Rust/C build output all over the place) that treating any "main"
             # on PATH as whisper.cpp would be a false positive, not a real detection.
             "whisper_cli": _which("whisper-cli", "whisper-cpp"),
-            "faster_whisper": bool(qa_models),
+            "faster_whisper": bool(qa_models) and not qa_repair,
             "models": qa_models,
+            "repair": qa_repair,
         },
         "qa_active": qa_active,
         "telegram": os.path.exists(os.path.join(_xdg_config_home(), "telegram-send", "bots.json")),
@@ -763,7 +837,20 @@ def auto_setup_plan(cfg=None, det=None, only=None):
 
     if effective_mode == "always":
         qa_level = cfg.get("qa_level", "auto")
-        if det.get("qa_active") is None and qa_level != "none":
+        qa_repair = (det.get("qa", {}) or {}).get("repair")
+        if det.get("qa_active") is not None and qa_repair and qa_level != "none":
+            # A repair, not a gap and not a fresh install: the model is on disk, only
+            # the runtime needs a fix (setup.sh install qa-<level> swaps av in place).
+            # Never blocks an episode -- the script is still produced (Tier 0), and the
+            # announcement names the repair and its real (small) size.
+            result["components"].append({
+                "component": f"qa-{det['qa_active']}", "kind": "qa", "target": det["qa_active"],
+                "repair": qa_repair,
+                "bytes": QA_REPAIR_BYTES, "download_bytes": QA_REPAIR_BYTES,
+            })
+            result["total_bytes"] += QA_REPAIR_BYTES
+            result["total_download_bytes"] += QA_REPAIR_BYTES
+        elif det.get("qa_active") is None and qa_level != "none":
             target = qa_level if qa_level in QA_LEVELS[1:] else "base"
             add(f"qa-{target}", "qa", target,
                 QA_DISK_BYTES.get(target, QA_DISK_BYTES["base"]),
@@ -865,13 +952,27 @@ def status(cfg=None, det=None):
         off_note_verb="voice", upgrade_note=_upgrade_voice_note,
     )
 
+    qa_repair = (det.get("qa", {}) or {}).get("repair")
+
+    def qa_active_note(level):
+        if qa_repair:
+            # "upgrade qa" here means `setup.sh install qa-<this level>` (SKILL.md),
+            # never qa-base: it is a repair of what's installed, not a new model.
+            auto = "" if cfg.get("auto_setup", "always") == "never" else " or let auto_setup fix it"
+            return (f'Needs a small repair: {qa_repair} cannot read audio files. Say "upgrade qa" '
+                    f'(reinstalls qa-{level}: ~{QA_REPAIR_BYTES // 1_000_000} MB, the model is kept){auto}.')
+        return "Rendered audio will be checked against the script."
+
     qa = _tier_row(
         active=det.get("qa_active"), setting=cfg.get("qa_level", "auto"),
         levels=QA_LEVELS[1:], installed_pred=lambda lvl: lvl in qa_models,
-        size_hints=QA_SIZE_HINTS, active_note=lambda level: "Rendered audio will be checked against the script.",
+        size_hints=QA_SIZE_HINTS, active_note=qa_active_note,
         off_note_verb="qa",
         upgrade_note=lambda: f'Say "upgrade qa" to check audio against the script ({QA_SIZE_HINTS["base"]}).',
     )
+    if qa_repair and qa["active"]:
+        qa["state"] = f'{qa["active"]} (needs repair)'
+        qa["repair"] = qa_repair
 
     telegram_bot = cfg.get("telegram_bot") or ""
     if telegram_bot:
@@ -929,8 +1030,12 @@ def status(cfg=None, det=None):
         # "missing" is a gap (no audio at all without it); "upgrades" is something
         # that already works but shouldn't stay -- the skill words the two
         # differently and must never block an episode on an upgrade.
-        "missing": [c["component"] for c in plan["components"] if not c.get("upgrade_from")],
+        "missing": [c["component"] for c in plan["components"]
+                    if not c.get("upgrade_from") and not c.get("repair")],
         "upgrades": [c["component"] for c in plan["components"] if c.get("upgrade_from")],
+        # "repairs": installed, but broken by something outside our control (e.g. an
+        # incompatible av, 2026-10-04) -- small, named, and never blocks an episode.
+        "repairs": [c["component"] for c in plan["components"] if c.get("repair")],
         "total_bytes": plan["total_bytes"],
     }
 
@@ -1719,6 +1824,157 @@ def run_selftest():
             plan_satisfied = auto_setup_plan(dict(base_cfg, auto_setup="always"), everything_det)
             check("plan(always, everything already installed): nothing to do",
                   plan_satisfied["components"] == [] and plan_satisfied["total_bytes"] == 0)
+
+            # -- av repair (2026-10-04): faster-whisper 1.2.1 + av 19 can't decode a file --
+            broken_av_det = shape(
+                voice={"piper": True, "kokoro": True}, voice_active="kokoro",
+                qa={"whisper_cli": None, "faster_whisper": False, "models": ["base"],
+                    "repair": "av 19.0.1"}, qa_active="base")
+            plan_rep = auto_setup_plan(dict(base_cfg, auto_setup="always"), broken_av_det)
+            rep_comps = [c for c in plan_rep["components"] if c["kind"] == "qa"]
+            check("av repair: planned as a repair of the installed level, not a fresh install",
+                  len(rep_comps) == 1 and rep_comps[0]["component"] == "qa-base"
+                  and rep_comps[0].get("repair") == "av 19.0.1")
+            check("av repair: sized as the small repair, not the ~575 MB model",
+                  plan_rep["total_bytes"] == QA_REPAIR_BYTES
+                  and plan_rep["total_download_bytes"] == QA_REPAIR_BYTES)
+            check("av repair: audio-only scope leaves QA alone",
+                  auto_setup_plan(dict(base_cfg, auto_setup="always"), broken_av_det,
+                                  only="audio")["components"] == [])
+            check("av repair: auto_setup=never repairs nothing behind the user's back",
+                  auto_setup_plan(dict(base_cfg, auto_setup="never"), broken_av_det)["components"] == [])
+            check("av repair: qa_level=none is left alone",
+                  auto_setup_plan(dict(base_cfg, auto_setup="always", qa_level="none"),
+                                  broken_av_det)["components"] == [])
+            st_rep = status(dict(base_cfg, auto_setup="always"), broken_av_det)
+            check("av repair: status reports it as a repair, not missing",
+                  st_rep["auto_setup"]["repairs"] == ["qa-base"]
+                  and st_rep["auto_setup"]["missing"] == [] and st_rep["auto_setup"]["upgrades"] == [])
+            check("av repair: the QA row names the repair, its size and what to say",
+                  "needs repair" in st_rep["qa"]["state"] and "av 19.0.1" in st_rep["qa"]["note"]
+                  and "upgrade qa" in st_rep["qa"]["note"] and "MB" in st_rep["qa"]["note"])
+            check("av repair: the note says 'upgrade qa' reinstalls the ACTIVE level, not qa-base",
+                  "qa-medium" in status(dict(base_cfg, auto_setup="always"), dict(
+                      broken_av_det, qa_active="medium",
+                      qa=dict(broken_av_det["qa"], models=["medium"])))["qa"]["note"])
+            check("av repair: auto_setup=never -> the note doesn't promise auto_setup will fix it",
+                  "auto_setup" not in status(dict(base_cfg, auto_setup="never"), broken_av_det)["qa"]["note"]
+                  and "auto_setup" in st_rep["qa"]["note"])
+            check("av repair: a healthy machine reports no repairs",
+                  status(dict(base_cfg, auto_setup="always"), everything_det)["auto_setup"]["repairs"] == []
+                  and "needs repair" not in status(base_cfg, everything_det)["qa"]["state"])
+
+            # setup.sh pins/repairs av with its own copy of the cutoff -- they must agree.
+            try:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.sh"),
+                          encoding="utf-8") as f:
+                    setup_src = f.read()
+                m_major = re.search(r'^AV_BROKEN_MAJOR=(\d+)$', setup_src, re.M)
+                m_pin = re.search(r'^AV_PIN="av>=\d+,<(\d+)"$', setup_src, re.M)
+                check("av repair: setup.sh's AV_BROKEN_MAJOR and AV_PIN cap match config.AV_BROKEN_MAJOR",
+                      bool(m_major and m_pin) and int(m_major.group(1)) == AV_BROKEN_MAJOR
+                      and int(m_pin.group(1)) == AV_BROKEN_MAJOR)
+            except OSError:
+                check("av repair: setup.sh is readable next to config.py", False)
+
+            # _qa_runtime_problem() reads the venv's av dist-info names -- no import --
+            # and only in the venv's LIVE site-packages (pyvenv.cfg's Python version).
+            setup_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.sh")
+            state_av = os.path.join(td, "state-av")
+            os.environ["PODCAST_STATE_DIR"] = state_av
+            try:
+                check("av probe: no venv at all -> no problem reported", _qa_runtime_problem() is None)
+                venv_av = os.path.join(state_av, "venv")
+                os.makedirs(os.path.join(venv_av, "bin"), exist_ok=True)
+                with open(os.path.join(venv_av, "bin", "python3"), "w", encoding="utf-8") as f:
+                    f.write("x")
+                with open(os.path.join(venv_av, "pyvenv.cfg"), "w", encoding="utf-8") as f:
+                    f.write("home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12.3\n")
+                sp = os.path.join(venv_av, "lib", "python3.12", "site-packages")
+                os.makedirs(sp, exist_ok=True)
+                check("av probe: venv without av -> no problem reported", _qa_runtime_problem() is None)
+                os.makedirs(os.path.join(sp, "av-18.1.0.dist-info"))
+                check("av probe: av 18.1.0 is compatible", _qa_runtime_problem() is None)
+                os.rename(os.path.join(sp, "av-18.1.0.dist-info"), os.path.join(sp, "av-19.0.1.dist-info"))
+                check("av probe: av 19.0.1 is flagged by version", _qa_runtime_problem() == "av 19.0.1")
+                os.rename(os.path.join(sp, "av-19.0.1.dist-info"), os.path.join(sp, "av-20.0.0.dist-info"))
+                check("av probe: later majors are flagged too", _qa_runtime_problem() == "av 20.0.0")
+                os.makedirs(os.path.join(sp, "avocado-1.0.dist-info"))
+                os.rename(os.path.join(sp, "av-20.0.0.dist-info"), os.path.join(sp, "av-17.1.0.dist-info"))
+                check("av probe: a package merely starting with 'av' is not mistaken for av",
+                      _qa_runtime_problem() is None)
+                os.makedirs(os.path.join(sp, "av-19.0.1.dist-info"))
+                check("av probe: two av dist-infos, one incompatible -> flagged (ANY, not first-wins)",
+                      _qa_runtime_problem() == "av 19.0.1")
+                os.rmdir(os.path.join(sp, "av-19.0.1.dist-info"))
+                stale = os.path.join(venv_av, "lib", "python3.11", "site-packages", "av-19.0.1.dist-info")
+                os.makedirs(stale)
+                check("av probe: an av 19 in a STALE lib/python3.11 (not the live 3.12) is ignored",
+                      _qa_runtime_problem() is None)
+                os.remove(os.path.join(venv_av, "pyvenv.cfg"))
+                with open(os.path.join(venv_av, "bin", "python3.12"), "w", encoding="utf-8") as f:
+                    f.write("x")
+                os.makedirs(os.path.join(sp, "av-19.0.1.dist-info"))
+                check("av probe: no pyvenv.cfg -> the live dir comes from bin/python3.X",
+                      _qa_runtime_problem() == "av 19.0.1")
+
+                # The same answers from setup.sh's own bash helpers (the code that
+                # decides whether `install qa-*` repairs), run against this fake venv.
+                if shutil.which("bash"):
+                    with open(setup_sh, encoding="utf-8") as f:
+                        src = f.read()
+                    fns = "\n".join(
+                        m.group(0) for name in ("_venv_site_packages", "_venv_av_versions",
+                                                "_av_is_incompatible", "_venv_av_incompatible")
+                        for m in [re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", src, re.M | re.S)] if m)
+                    def bash_av(cmd):
+                        r = subprocess.run(["bash", "-c", fns + "\nVENV_DIR=\"$1\"; AV_BROKEN_MAJOR=" +
+                                            str(AV_BROKEN_MAJOR) + "\n" + cmd, "_", venv_av],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                        return r.stdout.strip()
+                    check("setup.sh helpers: all four extracted from setup.sh",
+                          fns.count("() {") == 4)
+                    check("setup.sh: two av dist-infos -> both listed, the incompatible one flagged",
+                          sorted(bash_av("_venv_av_versions").split()) == ["17.1.0", "19.0.1"]
+                          and bash_av("_venv_av_incompatible") == "19.0.1")
+                    os.rmdir(os.path.join(sp, "av-19.0.1.dist-info"))
+                    with open(os.path.join(venv_av, "pyvenv.cfg"), "w", encoding="utf-8") as f:
+                        f.write("home = /usr/bin\nversion_info = 3.12.3\n")
+                    check("setup.sh: pyvenv.cfg version_info picks the live dir",
+                          bash_av("_venv_site_packages") == sp)
+                    check("setup.sh: av 19 only in a STALE lib/python3.11 -> no repair",
+                          bash_av("_venv_av_incompatible") == "")
+                    check("setup.sh: _av_is_incompatible boundaries (18.1.0 no, 19.0.0 yes, junk no)",
+                          bash_av('for v in 18.1.0 19.0.0 20.1 x.y ""; do _av_is_incompatible "$v" '
+                                  '&& printf "1" || printf "0"; done') == "01100")
+
+                # detect() on a real-looking state: model recorded, venv holding av 19.
+                os.makedirs(os.path.join(sp, "av-19.0.1.dist-info"))
+                model_bin = os.path.join(state_av, "models", "whisper", "model.bin")
+                os.makedirs(os.path.dirname(model_bin), exist_ok=True)
+                with open(model_bin, "wb") as f:
+                    f.write(b"x")
+                _atomic_write_json(os.path.join(state_av, "installed.json"), {
+                    "qa-base": {"ok": True, "requires_venv": True, "files": [model_bin]}})
+                _PROBE_CACHE.clear()
+                det_av = detect()
+                check("detect(): av 19 in the venv -> qa model still listed, active level kept",
+                      det_av["qa"]["models"] == ["base"] and det_av["qa_active"] == "base")
+                check("detect(): av 19 -> faster_whisper NOT ready (qa.py exits 3, no traceback)",
+                      det_av["qa"]["faster_whisper"] is False)
+                check("detect(): av 19 -> repair names the version", det_av["qa"]["repair"] == "av 19.0.1")
+                plan_av = auto_setup_plan(dict(base_cfg, auto_setup="always"), det_av)
+                check("detect()+plan: the repair is planned for the ACTIVE level at repair size",
+                      [(c["component"], c.get("repair"), c["bytes"]) for c in plan_av["components"]
+                       if c["kind"] == "qa"] == [("qa-base", "av 19.0.1", QA_REPAIR_BYTES)])
+                os.rmdir(os.path.join(sp, "av-19.0.1.dist-info"))
+                _PROBE_CACHE.clear()
+                det_ok = detect()
+                check("detect(): once av is fixed the repair clears and faster_whisper is ready",
+                      det_ok["qa"]["repair"] is None and det_ok["qa"]["faster_whisper"] is True)
+            finally:
+                del os.environ["PODCAST_STATE_DIR"]
+                _PROBE_CACHE.clear()
 
             # -- ffmpeg detection: bundled (our own state dir) wins over PATH --
             state6 = os.path.join(td, "state6")
